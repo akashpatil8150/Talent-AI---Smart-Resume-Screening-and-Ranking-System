@@ -5,6 +5,3 @@ scikit-learn
 PyPDF2
 nltk
 matplotlib
-seaborn
-
-
