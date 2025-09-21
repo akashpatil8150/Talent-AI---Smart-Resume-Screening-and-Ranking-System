@@ -1,10 +1,11 @@
-streamlit==1.36.0
-pandas==2.1.1
-numpy==1.24.3
-scikit-learn==1.3.0
-PyPDF2==3.0.1
-nltk==3.8.1
-matplotlib==3.7.2
-seaborn==0.12.2
+streamlit>=1.28.0
+pandas>=1.5.0
+numpy>=1.21.0
+scikit-learn>=1.1.0
+PyPDF2>=3.0.0
+nltk>=3.8.0
+matplotlib>=3.5.0
+seaborn>=0.11.0
+Pillow>=8.0.0
 
 
