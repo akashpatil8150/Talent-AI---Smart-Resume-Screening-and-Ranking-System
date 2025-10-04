@@ -1,4 +1,0 @@
-punkt
-punkt_tab
-stopwords
-averaged_perceptron_tagger
