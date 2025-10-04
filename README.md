@@ -141,26 +141,3 @@ The application expects a CSV file with the following columns:
 3. Commit your changes (`git commit -m 'Add some amazing feature'`)
 4. Push to the branch (`git push origin feature/amazing-feature`)
 5. Open a Pull Request
-
-## 📝 License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-## 🙏 Acknowledgments
-
-- Streamlit team for the amazing framework
-- scikit-learn for machine learning capabilities
-- NLTK for natural language processing
-- The open-source community for various libraries used
-
-## 📞 Support
-
-If you encounter any issues or have questions:
-
-1. Check the [Issues](https://github.com/yourusername/ai-resume-screening/issues) page
-2. Create a new issue with detailed information
-3. Contact the maintainers
-
----
-
-**Made with ❤️ using Streamlit**
