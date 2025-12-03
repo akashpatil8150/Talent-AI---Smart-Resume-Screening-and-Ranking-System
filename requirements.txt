@@ -6,5 +6,5 @@ PyPDF2
 nltk
 matplotlib
 seaborn
-
-
+sentence-transformers
+torch

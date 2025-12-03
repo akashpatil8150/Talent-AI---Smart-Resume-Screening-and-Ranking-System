@@ -144,3 +144,16 @@ Thumbs.db
 # Project specific
 *.csv
 !candidates.csv
+
+# Test files
+test_*.py
+*_test.py
+
+# Media and static files (if not needed)
+media/
+static/
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3

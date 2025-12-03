@@ -4,12 +4,13 @@ An AI-powered resume screening application that uses machine learning to intelli
 
 ## ✨ Features
 
-- **Smart Candidate Ranking**: Uses TF-IDF vectorization and cosine similarity to match candidates with job descriptions
+- **Smart Candidate Ranking**: Uses BERT (sentence-transformers) and cosine similarity for semantic matching
 - **PDF Resume Analysis**: Upload and analyze PDF resumes with automatic text extraction and insights
 - **Advanced Filtering**: Filter candidates by experience, skills, categories, and more
 - **Interactive Dashboard**: Beautiful, responsive UI with real-time data visualization
 - **Data Analysis**: Comprehensive dataset analysis with charts and statistics
 - **Export Functionality**: Download ranked candidate lists as CSV files
+- **Input Validation**: Comprehensive validation for weights, experience ranges, and required fields
 
 ## 🚀 Live Demo
 
@@ -19,7 +20,7 @@ An AI-powered resume screening application that uses machine learning to intelli
 
 - **Frontend**: Streamlit
 - **Backend**: Python
-- **ML Libraries**: scikit-learn, NLTK
+- **ML Libraries**: sentence-transformers (BERT), scikit-learn (cosine similarity), NLTK
 - **Data Processing**: pandas, numpy
 - **Visualization**: matplotlib, seaborn
 - **PDF Processing**: PyPDF2
@@ -94,8 +95,6 @@ The application uses environment variables for configuration:
 
 - `CANDIDATE_CSV`: Path to the candidate CSV file (default: "candidates.csv")
 - `TOP_N_DEFAULT`: Default number of top candidates to show (default: 100)
-- `MAX_FEATURES`: Maximum features for TF-IDF vectorizer (default: 150000)
-- `MIN_DF`: Minimum document frequency for TF-IDF (default: 2)
 
 ## 📊 Dataset Format
 
@@ -112,10 +111,11 @@ The application expects a CSV file with the following columns:
 ## 🎯 How It Works
 
 1. **Text Processing**: Cleans and normalizes text data from job descriptions and resumes
-2. **Vectorization**: Uses TF-IDF to convert text into numerical vectors
-3. **Similarity Calculation**: Computes cosine similarity between job descriptions and candidate profiles
-4. **Scoring**: Combines text similarity with experience scores using weighted averages
+2. **Vectorization**: Uses BERT (all-MiniLM-L6-v2) to convert text into semantic embeddings
+3. **Similarity Calculation**: Computes cosine similarity between job description and candidate embeddings
+4. **Scoring**: Combines text similarity with experience scores using weighted averages (configurable)
 5. **Ranking**: Ranks candidates based on their final match scores
+6. **Validation**: Ensures input integrity with comprehensive validation (weight sums, experience ranges)
 
 ## 🔍 Features in Detail
 
