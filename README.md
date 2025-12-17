@@ -13,7 +13,7 @@ An AI-powered resume screening application that uses machine learning to intelli
 
 ## 🚀 Live Demo
 
-[![Streamlit App](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://https://talent-ai---smart-resume-screening-and-ranking-system-culv5cse.streamlit.app)
+[![Streamlit App](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://talent-ai---smart-resume-screening-and-ranking-system-culv5cse.streamlit.app)
 
 ## 🛠️ Technology Stack
 
