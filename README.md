@@ -1,4 +1,4 @@
-# 🤖 Talent AI - Smart Resume Screening & Ranking
+# 🤖 Talent AI - Smart Resume Screening & Ranking System
 
 An AI-powered resume screening application that uses machine learning to intelligently rank candidates based on job descriptions and uploaded resumes.
 
