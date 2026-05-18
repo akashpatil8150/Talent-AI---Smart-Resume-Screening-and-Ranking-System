@@ -145,6 +145,10 @@ Thumbs.db
 *.csv
 !candidates.csv
 
+# BERT embedding cache - intentionally tracked for deployment
+# Pre-computed embeddings are included in the repo to avoid recomputation on every deploy
+# .bert_cache/
+
 # Test files
 test_*.py
 *_test.py

@@ -1,0 +1,86 @@
+{% extends "base.html" %}
+
+{% block title %}Dataset Analysis - Talent AI{% endblock %}
+
+{% block content %}
+<div class="space-y-6">
+    <div class="bg-white rounded-2xl shadow-lg border border-slate-200 p-6">
+        <div class="flex items-center space-x-2 mb-6">
+            <i class="fas fa-chart-pie text-indigo-600 text-xl"></i>
+            <h2 class="text-2xl font-bold text-slate-800">Dataset Analysis</h2>
+        </div>
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div class="bg-gradient-to-br from-indigo-50 to-purple-50 border border-indigo-200 rounded-xl p-6 text-center">
+                <p class="text-sm text-slate-600 mb-2">Total Rows</p>
+                <p class="text-4xl font-bold text-indigo-600">{{ total_rows }}</p>
+            </div>
+            <div class="bg-gradient-to-br from-blue-50 to-cyan-50 border border-blue-200 rounded-xl p-6 text-center">
+                <p class="text-sm text-slate-600 mb-2">Total Columns</p>
+                <p class="text-4xl font-bold text-blue-600">{{ total_cols }}</p>
+            </div>
+        </div>
+    </div>
+    
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        {% if charts.category_dist %}
+        <div class="bg-white rounded-2xl shadow-lg border border-slate-200 p-6">
+            <h3 class="text-lg font-semibold text-slate-800 mb-4 flex items-center">
+                <i class="fas fa-chart-bar text-indigo-600 mr-2"></i>
+                Candidate Categories Distribution
+            </h3>
+            <img src="data:image/png;base64,{{ charts.category_dist }}" class="w-full rounded-lg" alt="Category Distribution">
+        </div>
+        {% endif %}
+        
+        {% if charts.exp_dist %}
+        <div class="bg-white rounded-2xl shadow-lg border border-slate-200 p-6">
+            <h3 class="text-lg font-semibold text-slate-800 mb-4 flex items-center">
+                <i class="fas fa-chart-area text-blue-600 mr-2"></i>
+                Experience Distribution
+            </h3>
+            <img src="data:image/png;base64,{{ charts.exp_dist }}" class="w-full rounded-lg" alt="Experience Distribution">
+        </div>
+        {% endif %}
+        
+        {% if charts.exp_by_cat %}
+        <div class="bg-white rounded-2xl shadow-lg border border-slate-200 p-6">
+            <h3 class="text-lg font-semibold text-slate-800 mb-4 flex items-center">
+                <i class="fas fa-box text-purple-600 mr-2"></i>
+                Experience by Category
+            </h3>
+            <img src="data:image/png;base64,{{ charts.exp_by_cat }}" class="w-full rounded-lg" alt="Experience by Category">
+        </div>
+        {% endif %}
+        
+        {% if charts.top_skills %}
+        <div class="bg-white rounded-2xl shadow-lg border border-slate-200 p-6">
+            <h3 class="text-lg font-semibold text-slate-800 mb-4 flex items-center">
+                <i class="fas fa-code text-green-600 mr-2"></i>
+                Top 20 Skills
+            </h3>
+            <img src="data:image/png;base64,{{ charts.top_skills }}" class="w-full rounded-lg" alt="Top Skills">
+        </div>
+        {% endif %}
+        
+        {% if charts.email_domains %}
+        <div class="bg-white rounded-2xl shadow-lg border border-slate-200 p-6">
+            <h3 class="text-lg font-semibold text-slate-800 mb-4 flex items-center">
+                <i class="fas fa-envelope text-pink-600 mr-2"></i>
+                Top 10 Email Domains
+            </h3>
+            <img src="data:image/png;base64,{{ charts.email_domains }}" class="w-full rounded-lg" alt="Email Domains">
+        </div>
+        {% endif %}
+        
+        {% if charts.category_pie %}
+        <div class="bg-white rounded-2xl shadow-lg border border-slate-200 p-6">
+            <h3 class="text-lg font-semibold text-slate-800 mb-4 flex items-center">
+                <i class="fas fa-chart-pie text-orange-600 mr-2"></i>
+                Category Share
+            </h3>
+            <img src="data:image/png;base64,{{ charts.category_pie }}" class="w-full rounded-lg" alt="Category Share">
+        </div>
+        {% endif %}
+    </div>
+</div>
+{% endblock %}

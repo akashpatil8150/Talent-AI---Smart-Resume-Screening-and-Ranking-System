@@ -4,24 +4,197 @@ import math
 import re
 import uuid
 import json
+import traceback
+import pathlib
+from pathlib import Path
+from datetime import datetime
 import PyPDF2
 import nltk
 import pandas as pd
 import numpy as np
-import streamlit as st
+import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.preprocessing import MinMaxScaler
+from flask import Flask, render_template, request, session, send_file, jsonify
+from werkzeug.utils import secure_filename
+import base64
+from io import BytesIO
 
-# ------------------------- Config -------------------------
-CSV_PATH = os.environ.get("CANDIDATE_CSV", "candidates.csv")
-TOP_N_DEFAULT = int(os.environ.get("TOP_N_DEFAULT", "100"))
-MAX_FEATURES = int(os.environ.get("MAX_FEATURES", "150000"))
-MIN_DF = int(os.environ.get("MIN_DF", "2"))
+# Load environment variables from .env file (for local development)
+from dotenv import load_dotenv
+load_dotenv()
 
-# PDF Upload Config - 200MB maximum
-MAX_PDF_SIZE = 200 * 1024 * 1024  # 200MB max file size
+# Import BERT components
+import logging
+from bert_matcher import (
+    BERTEncoder,
+    SimilarityCalculator,
+    HybridScorer,
+    EmbeddingCache,
+    BERTConfig,
+    BERT_AVAILABLE,
+    initialize_bert_system,
+    get_bert_encoder,
+    get_embedding_cache
+)
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# ------------------------- Path Utility Functions -------------------------
+
+def get_platform_path(path_str: str) -> Path:
+    """Return a pathlib.Path for the given path string.
+
+    Using pathlib ensures cross-platform compatibility between Windows
+    (backslash separators) and Linux/macOS (forward-slash separators).
+
+    Args:
+        path_str: A file or directory path as a string.
+
+    Returns:
+        A pathlib.Path object representing the path.
+    """
+    return Path(path_str)
+
+
+def ensure_directory_exists(path) -> Path:
+    """Create a directory (and any missing parents) if it does not already exist.
+
+    Equivalent to ``mkdir -p`` on Unix.  Safe to call even when the directory
+    already exists (``exist_ok=True``).
+
+    Args:
+        path: A path string or pathlib.Path pointing to the directory to create.
+
+    Returns:
+        The resolved pathlib.Path of the directory.
+    """
+    dir_path = Path(path)
+    dir_path.mkdir(parents=True, exist_ok=True)
+    return dir_path
+
+
+# ------------------------- Config Class -------------------------
+class Config:
+    """Centralized configuration management for production deployment"""
+    
+    # Flask Configuration
+    SECRET_KEY: str = os.environ.get('SECRET_KEY', None) or os.urandom(24).hex()
+    FLASK_DEBUG: bool = os.environ.get('FLASK_DEBUG', 'False').lower() == 'true'
+    PORT: int = int(os.environ.get('PORT', 5000))
+    
+    # Session Cookie Security
+    SESSION_COOKIE_SECURE: bool = not FLASK_DEBUG  # HTTPS only in production
+    SESSION_COOKIE_HTTPONLY: bool = True
+    SESSION_COOKIE_SAMESITE: str = 'Lax'
+    
+    # Upload Configuration
+    MAX_CONTENT_LENGTH: int = 200 * 1024 * 1024  # 200MB
+    
+    # Data Configuration
+    CANDIDATE_CSV: str = os.environ.get('CANDIDATE_CSV', 'candidates.csv')
+    TOP_N_DEFAULT: int = int(os.environ.get('TOP_N_DEFAULT', '100'))
+    
+    # TF-IDF Configuration
+    MAX_FEATURES: int = int(os.environ.get('MAX_FEATURES', '150000'))
+    MIN_DF: int = int(os.environ.get('MIN_DF', '2'))
+    
+    # BERT Configuration
+    BERT_MODEL_NAME: str = os.environ.get('BERT_MODEL_NAME', 
+                                          'sentence-transformers/all-MiniLM-L6-v2')
+    BERT_BATCH_SIZE: int = int(os.environ.get('BERT_BATCH_SIZE', '8'))
+    BERT_DEVICE: str = os.environ.get('BERT_DEVICE', 'auto')
+    BERT_FORCE_CPU: bool = os.environ.get('BERT_FORCE_CPU', 'true').lower() == 'true'
+    SKIP_BERT_PRECOMPUTE: bool = os.environ.get('SKIP_BERT_PRECOMPUTE', 
+                                                  'true').lower() == 'true'
+    
+    # Matching Configuration
+    MATCHING_MODE: str = os.environ.get('MATCHING_MODE', 'hybrid')  # bert, tfidf, hybrid
+    
+    # Cache Configuration
+    CACHE_DIR: str = os.environ.get('CACHE_DIR', '.bert_cache')
+    TRANSFORMERS_CACHE: str = os.environ.get('TRANSFORMERS_CACHE', './.cache')
+    
+    @classmethod
+    def validate(cls):
+        """Validate configuration integrity"""
+        errors = []
+        
+        # Validate SECRET_KEY length (at least 16 characters for security)
+        if len(cls.SECRET_KEY) < 16:
+            errors.append("SECRET_KEY must be at least 16 characters")
+        
+        # Validate matching mode
+        if cls.MATCHING_MODE not in ['bert', 'tfidf', 'hybrid']:
+            errors.append(f"Invalid MATCHING_MODE: {cls.MATCHING_MODE}. Must be 'bert', 'tfidf', or 'hybrid'")
+        
+        # Validate file paths
+        if not get_platform_path(cls.CANDIDATE_CSV).exists():
+            errors.append(f"Candidate CSV not found: {cls.CANDIDATE_CSV}")
+        
+        # Validate numeric ranges
+        if cls.PORT < 1 or cls.PORT > 65535:
+            errors.append(f"Invalid PORT: {cls.PORT}. Must be between 1-65535")
+        
+        if cls.BERT_BATCH_SIZE < 1:
+            errors.append(f"Invalid BERT_BATCH_SIZE: {cls.BERT_BATCH_SIZE}. Must be positive")
+        
+        if cls.MAX_FEATURES < 1:
+            errors.append(f"Invalid MAX_FEATURES: {cls.MAX_FEATURES}. Must be positive")
+        
+        if cls.MIN_DF < 1:
+            errors.append(f"Invalid MIN_DF: {cls.MIN_DF}. Must be positive")
+        
+        if errors:
+            raise ValueError(f"Configuration validation failed: {'; '.join(errors)}")
+        
+        return True
+    
+    @classmethod
+    def log_config(cls):
+        """Log startup configuration (excluding secrets)"""
+        logger.info("=" * 60)
+        logger.info("Application Configuration:")
+        logger.info("-" * 60)
+        logger.info(f"  Flask Debug Mode: {cls.FLASK_DEBUG}")
+        logger.info(f"  Port: {cls.PORT}")
+        logger.info(f"  Max Content Length: {cls.MAX_CONTENT_LENGTH / (1024*1024):.0f}MB")
+        logger.info(f"  Session Cookie Secure: {cls.SESSION_COOKIE_SECURE}")
+        logger.info(f"  Session Cookie HttpOnly: {cls.SESSION_COOKIE_HTTPONLY}")
+        logger.info(f"  Session Cookie SameSite: {cls.SESSION_COOKIE_SAMESITE}")
+        logger.info("-" * 60)
+        logger.info(f"  Candidate CSV: {cls.CANDIDATE_CSV}")
+        logger.info(f"  Top N Default: {cls.TOP_N_DEFAULT}")
+        logger.info("-" * 60)
+        logger.info(f"  TF-IDF Max Features: {cls.MAX_FEATURES}")
+        logger.info(f"  TF-IDF Min DF: {cls.MIN_DF}")
+        logger.info("-" * 60)
+        logger.info(f"  BERT Model: {cls.BERT_MODEL_NAME}")
+        logger.info(f"  BERT Batch Size: {cls.BERT_BATCH_SIZE}")
+        logger.info(f"  BERT Device: {cls.BERT_DEVICE}")
+        logger.info(f"  BERT Force CPU: {cls.BERT_FORCE_CPU}")
+        logger.info(f"  Skip BERT Precompute: {cls.SKIP_BERT_PRECOMPUTE}")
+        logger.info("-" * 60)
+        logger.info(f"  Matching Mode: {cls.MATCHING_MODE}")
+        logger.info(f"  Cache Directory: {cls.CACHE_DIR}")
+        logger.info(f"  Transformers Cache: {cls.TRANSFORMERS_CACHE}")
+        logger.info("=" * 60)
+
+# Legacy variable names for backward compatibility
+CSV_PATH = Config.CANDIDATE_CSV
+TOP_N_DEFAULT = Config.TOP_N_DEFAULT
+MAX_FEATURES = Config.MAX_FEATURES
+MIN_DF = Config.MIN_DF
+BERT_MODEL_NAME = Config.BERT_MODEL_NAME
+BERT_BATCH_SIZE = Config.BERT_BATCH_SIZE
+BERT_DEVICE = Config.BERT_DEVICE
+MATCHING_MODE = Config.MATCHING_MODE
+MAX_PDF_SIZE = Config.MAX_CONTENT_LENGTH
 
 # Download NLTK data only if needed
 try:
@@ -144,24 +317,74 @@ def build_vectorizer(text_series):
     return vect, X
 
 # ------------------------- PDF Processing Functions -------------------------
+class PDFExtractionError(ValueError):
+    """Raised when a PDF cannot be read or parsed.
+
+    Carries a *user_message* (safe to surface in API responses) and an
+    optional *detail* string that is only written to logs.
+    """
+
+    def __init__(self, user_message: str, detail: str = ""):
+        super().__init__(user_message)
+        self.user_message = user_message
+        self.detail = detail or user_message
+
+
 def extract_text_from_pdf(pdf_file):
-    """Extract text from PDF file with size validation"""
+    """Extract text from a PDF file object.
+
+    Args:
+        pdf_file: A file-like object positioned at the start of the PDF data.
+
+    Returns:
+        Extracted text as a string (may be empty for image-only PDFs).
+
+    Raises:
+        PDFExtractionError: For any problem reading or parsing the PDF,
+            including oversized files and corrupted/encrypted documents.
+    """
+    # Check file size first (seek to end, then reset)
     try:
-        # Check file size
-        pdf_file.seek(0, 2)  # Seek to end
+        pdf_file.seek(0, 2)
         file_size = pdf_file.tell()
-        pdf_file.seek(0)  # Reset to beginning
-       
-        if file_size > MAX_PDF_SIZE:
-            raise Exception(f"PDF file size ({file_size / (1024*1024):.1f}MB) exceeds maximum allowed size (200MB)")
-       
+        pdf_file.seek(0)
+    except (OSError, IOError) as e:
+        logger.error("PDF size check failed: %s", e, exc_info=True)
+        raise PDFExtractionError(
+            "Could not read the uploaded file. Please try again.",
+            detail=f"Seek error during size check: {e}",
+        )
+
+    if file_size > MAX_PDF_SIZE:
+        size_mb = file_size / (1024 * 1024)
+        raise PDFExtractionError(
+            f"The uploaded file is too large ({size_mb:.1f} MB). "
+            "Please upload a PDF smaller than 200 MB.",
+            detail=f"File size {size_mb:.1f} MB exceeds MAX_PDF_SIZE limit.",
+        )
+
+    try:
         pdf_reader = PyPDF2.PdfReader(pdf_file)
         text = ""
         for page in pdf_reader.pages:
-            text += page.extract_text() + "\n"
+            page_text = page.extract_text()
+            if page_text:
+                text += page_text + "\n"
         return text.strip()
+    except PyPDF2.errors.PdfReadError as e:
+        logger.error("Corrupted or unreadable PDF: %s", e, exc_info=True)
+        raise PDFExtractionError(
+            "The uploaded PDF could not be read. "
+            "It may be corrupted, password-protected, or not a valid PDF.",
+            detail=f"PyPDF2 PdfReadError: {e}",
+        )
     except Exception as e:
-        raise Exception(f"Error extracting text from PDF: {str(e)}")
+        logger.error("Unexpected error extracting PDF text: %s", e, exc_info=True)
+        raise PDFExtractionError(
+            "An error occurred while processing the PDF. "
+            "Please ensure the file is a valid, unencrypted PDF and try again.",
+            detail=f"Unexpected extraction error: {e}",
+        )
 
 def extract_insights_from_resume(text):
     """Extract insights from resume text using NLP"""
@@ -175,30 +398,55 @@ def extract_insights_from_resume(text):
         'companies': [],
         'summary': ''
     }
+    
+    # Clean text - normalize all whitespace first
+    text = re.sub(r'\s+', ' ', text)
+    text = text.strip()
+    
+    # Remove leading special characters
+    text = re.sub(r'^[/\\\-_\s]+', '', text)
+    
+    lines = [line.strip() for line in text.split('\n') if line.strip()]
+    text_lower = text.lower()
    
-    # Extract name
-    name_patterns = [
-        r'(?:name|full name|contact)[:\s]*([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)',
-        r'^([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)',
-        r'([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)(?:\s+email|\s+phone|\s+address)',
-        r'([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)(?:\s+Phone|\s+Email|\s+Address)',
-    ]
-   
-    for pattern in name_patterns:
-        matches = re.findall(pattern, text, re.IGNORECASE | re.MULTILINE)
-        if matches:
-            name = matches[0].strip()
-            name_parts = name.split()
-            if len(name_parts) >= 2 and all(len(part) > 1 for part in name_parts):
-                cleaned_parts = []
-                for part in name_parts:
-                    if part.lower() in ['phone', 'email', 'address', 'contact', 'mobile', 'tel']:
-                        break
-                    cleaned_parts.append(part)
-               
-                if len(cleaned_parts) >= 2:
-                    insights['name'] = ' '.join(cleaned_parts)
-                    break
+    # Extract name - Look at the very first line before any contact info
+    # The format is usually: NAME phone email linkedin location
+    first_line = lines[0] if lines else ''
+    
+    # Try to extract name from first line (before phone/email)
+    # Split by common delimiters
+    parts = re.split(r'[\d@]', first_line)
+    if parts and parts[0]:
+        potential_name = parts[0].strip()
+        # Clean up the name - remove special chars, keep only letters and spaces
+        potential_name = re.sub(r'[^A-Za-z\s]', '', potential_name)
+        potential_name = re.sub(r'\s+', ' ', potential_name).strip()
+        
+        # Check if it looks like a name (2-5 words, each word 2+ chars)
+        name_words = [w for w in potential_name.split() if len(w) >= 2]
+        if 2 <= len(name_words) <= 5:
+            insights['name'] = ' '.join(name_words)
+    
+    # Fallback: Look for name in first few lines
+    if not insights['name']:
+        for i, line in enumerate(lines[:10]):
+            # Skip lines with contact info patterns
+            if re.search(r'@|http|www|\.com|phone|email|linkedin|github|\d{10}', line.lower()):
+                continue
+            
+            # Skip lines that are section headers
+            if line.lower() in ['summary', 'experience', 'education', 'skills', 'projects']:
+                continue
+                
+            # Clean the line
+            clean_line = re.sub(r'[^A-Za-z\s]', '', line)
+            clean_line = re.sub(r'\s+', ' ', clean_line).strip()
+            
+            # Check if it looks like a name
+            words = [w for w in clean_line.split() if len(w) >= 2]
+            if 2 <= len(words) <= 5:
+                insights['name'] = ' '.join(words)
+                break
    
     # Extract email
     email_pattern = r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'
@@ -207,10 +455,19 @@ def extract_insights_from_resume(text):
         insights['email'] = emails[0]
    
     # Extract phone
-    phone_pattern = r'(\+?1?[-.\s]?)?\(?([0-9]{3})\)?[-.\s]?([0-9]{3})[-.\s]?([0-9]{4})'
-    phones = re.findall(phone_pattern, text)
-    if phones:
-        insights['phone'] = ''.join(phones[0])
+    phone_patterns = [
+        r'(\d{10})',  # Simple 10 digit
+        r'(\+?\d{1,3}[-.\s]?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4})',
+        r'(\d{3}[-.\s]?\d{3}[-.\s]?\d{4})',
+    ]
+    for pattern in phone_patterns:
+        phones = re.findall(pattern, text)
+        if phones:
+            phone = phones[0]
+            phone = re.sub(r'[^\d+]', '', phone)
+            if len(phone) >= 10:
+                insights['phone'] = phone
+                break
    
     # Extract skills
     skill_keywords = [
@@ -219,38 +476,39 @@ def extract_insights_from_resume(text):
         'docker', 'kubernetes', 'git', 'jenkins', 'agile', 'scrum', 'machine learning',
         'ai', 'data science', 'pandas', 'numpy', 'tensorflow', 'pytorch', 'scikit-learn',
         'html', 'css', 'bootstrap', 'tailwind', 'php', 'c++', 'c#', '.net', 'spring',
-        'hibernate', 'junit', 'selenium', 'jira', 'confluence', 'figma', 'adobe'
+        'hibernate', 'junit', 'selenium', 'jira', 'confluence', 'figma', 'adobe',
+        'tableau', 'power bi', 'excel', 'powerpoint', 'word', 'analytics', 'statistics',
+        'r programming', 'matlab', 'spark', 'hadoop', 'kafka', 'redis', 'elasticsearch',
+        'graphql', 'rest api', 'microservices', 'devops', 'ci/cd', 'linux', 'unix',
+        'typescript', 'golang', 'rust', 'kotlin', 'swift', 'flutter', 'react native'
     ]
    
-    text_lower = text.lower()
     found_skills = []
     for skill in skill_keywords:
         if skill in text_lower:
             found_skills.append(skill.title())
     insights['skills'] = list(set(found_skills))
    
-    # Extract experience years
+    # Extract experience years - look for patterns in the text
     exp_patterns = [
-        r'(\d+)\s*(?:years?|yrs?)\s*(?:of\s*)?experience',
-        r'experience[:\s](\d+)\s(?:years?|yrs?)',
-        r'(\d+)\s*(?:years?|yrs?)\s*in\s*(?:the\s*)?field',
-        r'(\d+)\s*(?:years?|yrs?)\s*(?:in\s+)?(?:software|development|programming|data|analysis)',
-        r'(\d+)\s*(?:years?|yrs?)\s*(?:of\s+)?(?:work|professional|industry)',
-        r'(\d+)\s*(?:years?|yrs?)\s*(?:in\s+)?(?:it|technology|tech)',
-        r'(\d+)\s*(?:years?|yrs?)\s*(?:of\s+)?(?:coding|programming)'
+        r'(\d+)\+?\s*(?:years?|yrs?)\s*(?:of\s*)?(?:experience|exp)',
+        r'experience[:\s]*(\d+)\+?\s*(?:years?|yrs?)',
+        r'(\d+)\+?\s*(?:years?|yrs?)\s*(?:in|of|as)',
     ]
    
     for pattern in exp_patterns:
         matches = re.findall(pattern, text_lower)
         if matches:
             try:
-                insights['experience_years'] = int(matches[0])
-                break
+                years = int(matches[0])
+                if 0 <= years <= 50:
+                    insights['experience_years'] = years
+                    break
             except:
                 continue
    
     # Extract education
-    education_keywords = ['bachelor', 'master', 'phd', 'degree', 'university', 'college', 'school']
+    education_keywords = ['bachelor', 'master', 'phd', 'degree', 'university', 'college', 'school', 'b.tech', 'm.tech', 'mba', 'bca', 'mca']
     sentences = nltk.sent_tokenize(text)
     education_sentences = []
     for sentence in sentences:
@@ -258,9 +516,11 @@ def extract_insights_from_resume(text):
             education_sentences.append(sentence.strip())
     insights['education'] = education_sentences[:3]
    
-    # Generate summary
-    sentences = nltk.sent_tokenize(text)
-    if sentences:
+    # Generate summary - look for SUMMARY section
+    summary_match = re.search(r'SUMMARY\s*(.{50,500}?)(?:EXPERIENCE|EDUCATION|SKILLS|$)', text, re.IGNORECASE | re.DOTALL)
+    if summary_match:
+        insights['summary'] = summary_match.group(1).strip()[:300]
+    elif sentences:
         insights['summary'] = sentences[0][:200] + "..." if len(sentences[0]) > 200 else sentences[0]
    
     return insights
@@ -355,30 +615,210 @@ def calculate_resume_score(insights, job_description):
     return min(max_score, int(score))
 
 # ------------------------- Global Cache -------------------------
-@st.cache_data
-def load_cached_data():
-    """Load and cache data to avoid reloading"""
-    if not os.path.exists(CSV_PATH):
-        raise FileNotFoundError(f"CSV not found at {CSV_PATH}")
-    df, report = load_data(CSV_PATH)
-    vect, X = build_vectorizer(df["_combined_text"])
-    return df, vect, X, report
+_cached_data = None
+_bert_initialized = False
+_effective_matching_mode = MATCHING_MODE  # Tracks actual mode after BERT init (may fall back to tfidf)
 
-def ensure_model_loaded():
-    """Ensure model is loaded and cached"""
-    if 'cached_data' not in st.session_state:
+def load_cached_data():
+    """Load and cache data to avoid reloading.
+
+    Raises:
+        FileNotFoundError: When candidates.csv is missing from the configured path.
+        ValueError: When the CSV is present but fails validation.
+        Exception: For any other unexpected loading error.
+    """
+    global _cached_data
+    if _cached_data is None:
+        csv_path = get_platform_path(CSV_PATH)
+        if not csv_path.exists():
+            msg = (
+                f"Candidate dataset not found at '{CSV_PATH}'. "
+                "Ensure candidates.csv is present in the application directory "
+                "or set the CANDIDATE_CSV environment variable to the correct path."
+            )
+            logger.error(msg)
+            raise FileNotFoundError(msg)
+        logger.info(f"Loading candidate dataset from '{CSV_PATH}'...")
         try:
-            st.session_state.cached_data = load_cached_data()
-        except Exception as e:
-            st.error(f"Error loading data: {e}")
-            st.session_state.cached_data = None
+            df, report = load_data(CSV_PATH)
+        except ValueError as ve:
+            logger.error(f"Candidate dataset validation failed: {ve}", exc_info=True)
+            raise
+        except Exception as exc:
+            logger.error(f"Unexpected error loading candidate dataset: {exc}", exc_info=True)
+            raise
+        logger.info(f"Candidate dataset loaded: {len(df)} rows.")
+        try:
+            vect, X = build_vectorizer(df["_combined_text"])
+        except Exception as exc:
+            logger.error(f"Failed to build TF-IDF vectorizer: {exc}", exc_info=True)
+            raise
+        _cached_data = (df, vect, X, report)
+    return _cached_data
+
+# Module-level flag set when data loading fails at startup so routes can
+# return a meaningful 503 without attempting to reload on every request.
+_data_load_error: str | None = None
 
 def get_cached_data():
-    """Get cached data"""
-    ensure_model_loaded()
-    if st.session_state.cached_data is None:
+    """Return cached data tuple, or (None, None, None, None) on failure.
+
+    Logs a clear error message the first time loading fails so operators can
+    diagnose the problem from application logs.
+    """
+    global _data_load_error
+    try:
+        return load_cached_data()
+    except FileNotFoundError as e:
+        _data_load_error = str(e)
+        logger.error(f"Data unavailable — candidates.csv missing: {e}")
         return None, None, None, None
-    return st.session_state.cached_data
+    except Exception as e:
+        _data_load_error = str(e)
+        logger.error(f"Data unavailable — failed to load candidate dataset: {e}", exc_info=True)
+        return None, None, None, None
+
+def initialize_bert():
+    """Initialize BERT system at application startup with comprehensive error handling.
+    
+    On failure, logs a warning and updates _effective_matching_mode to 'tfidf' so the
+    application continues to operate in TF-IDF-only mode (graceful fallback).
+    
+    Cache regeneration logic (Requirement 5.3, 7.3):
+    - Checks if the embedding cache file exists on disk at startup
+    - If missing and SKIP_BERT_PRECOMPUTE=false, computes embeddings and saves to disk
+    - Creates the cache directory if it doesn't exist (using pathlib)
+    """
+    global _bert_initialized, _effective_matching_mode
+    
+    if _bert_initialized:
+        logger.info("BERT already initialized")
+        return True
+    
+    if not BERT_AVAILABLE:
+        logger.warning("BERT dependencies not available. Using TF-IDF only mode.")
+        logger.info("To enable BERT: pip install sentence-transformers torch")
+        _effective_matching_mode = "tfidf"
+        logger.info(f"Matching mode updated to: {_effective_matching_mode}")
+        return False
+    
+    try:
+        logger.info("=" * 60)
+        logger.info("Starting BERT initialization...")
+        logger.info("=" * 60)
+        
+        # Create BERT config
+        config = BERTConfig(
+            model_name=BERT_MODEL_NAME,
+            batch_size=BERT_BATCH_SIZE,
+            device=BERT_DEVICE
+        )
+        
+        # Initialize BERT system
+        logger.info(f"Model: {config.model_name}")
+        logger.info(f"Batch size: {config.batch_size}")
+        logger.info(f"Device: {config.device}")
+        
+        success = initialize_bert_system(config)
+        
+        if success:
+            # Pre-compute candidate embeddings (optional - can be skipped for faster startup)
+            logger.info("Loading candidate data for pre-computation...")
+            df, _, _, _ = get_cached_data()
+            
+            if df is not None:
+                encoder = get_bert_encoder()
+                cache = get_embedding_cache()
+                
+                if encoder and cache:
+                    # Check if we should skip pre-computation for faster startup
+                    skip_precompute = os.environ.get("SKIP_BERT_PRECOMPUTE", "false").lower() == "true"
+                    
+                    if skip_precompute:
+                        logger.info("Skipping BERT pre-computation (SKIP_BERT_PRECOMPUTE=true)")
+                        logger.info("Embeddings will be computed on-demand during queries")
+                        logger.info("BERT system initialized successfully")
+                        logger.info("=" * 60)
+                        _bert_initialized = True
+                        return True
+                    
+                    # --- Cache regeneration logic (Task 6.3) ---
+                    # Ensure the cache directory exists (create with parents if needed)
+                    cache_dir_path = ensure_directory_exists(get_platform_path(Config.CACHE_DIR))
+                    logger.info(f"Cache directory ensured: {cache_dir_path}")
+                    
+                    # Check whether the cache file already exists on disk
+                    cache_file_path = cache_dir_path / "embeddings.npz"
+                    cache_exists = cache_file_path.exists()
+                    
+                    if cache_exists and len(cache.cache) > 0:
+                        # Cache was already loaded from disk by initialize_bert_system()
+                        logger.info(
+                            f"Embedding cache found on disk ({cache_file_path}). "
+                            f"Loaded {len(cache.cache)} embeddings — skipping recomputation."
+                        )
+                        logger.info("BERT system fully initialized and ready")
+                        logger.info("=" * 60)
+                        _bert_initialized = True
+                        return True
+                    
+                    if not cache_exists:
+                        logger.info(
+                            f"No embedding cache found at {cache_file_path}. "
+                            "Computing embeddings for all candidates..."
+                        )
+                    else:
+                        logger.info(
+                            f"Cache file exists at {cache_file_path} but was not loaded "
+                            "(possibly empty or corrupt). Recomputing embeddings..."
+                        )
+                    
+                    logger.info(f"Pre-computing BERT embeddings for {len(df)} candidates...")
+                    logger.info("This may take 3-5 minutes. Set SKIP_BERT_PRECOMPUTE=true to skip.")
+                    try:
+                        # precompute_all() encodes all candidates and calls save_to_disk()
+                        # which writes embeddings.npz and metadata.json to the cache directory
+                        cache.precompute_all(df, encoder, text_column="_combined_text")
+                        logger.info(
+                            f"Embeddings saved to disk at {cache_file_path} "
+                            f"({len(cache.cache)} candidates)."
+                        )
+                        logger.info("BERT system fully initialized and ready")
+                        logger.info("=" * 60)
+                        _bert_initialized = True
+                        return True
+                    except KeyboardInterrupt:
+                        logger.warning("Pre-computation interrupted by user")
+                        logger.info("BERT initialized but pre-computation incomplete. Will encode on-demand.")
+                        logger.info("=" * 60)
+                        _bert_initialized = True
+                        return True
+                    except Exception as precomp_error:
+                        logger.error(f"Pre-computation failed: {precomp_error}", exc_info=True)
+                        logger.warning("BERT initialized but pre-computation failed. Will encode on-demand.")
+                        logger.info("=" * 60)
+                        _bert_initialized = True
+                        return True
+                else:
+                    logger.error("BERT encoder or cache not available after initialization")
+            else:
+                logger.error("Failed to load candidate data")
+        
+        # BERT initialization failed — fall back to TF-IDF
+        logger.warning("BERT initialization failed. Falling back to TF-IDF mode.")
+        _effective_matching_mode = "tfidf"
+        logger.info(f"Matching mode updated to: {_effective_matching_mode}")
+        logger.info("=" * 60)
+        return False
+        
+    except Exception as e:
+        # Unexpected error during BERT init — fall back to TF-IDF so the app stays available
+        logger.error(f"BERT initialization error: {e}", exc_info=True)
+        logger.warning("Falling back to TF-IDF only mode due to BERT initialization error.")
+        _effective_matching_mode = "tfidf"
+        logger.info(f"Matching mode updated to: {_effective_matching_mode}")
+        logger.info("=" * 60)
+        return False
 
 # ------------------------- Category Filter -------------------------
 def filter_by_category(jd: str, df: pd.DataFrame):
@@ -421,10 +861,21 @@ def rank_candidates(
     exclude_skills: str,
     selected_categories: list[str],
     uploaded_resume: dict | None,
+    matching_mode: str = None,  # NEW: "bert", "tfidf", or "hybrid"
 ):
     """Rank candidates based on job description and filters"""
+    # Determine matching mode — use _effective_matching_mode (which may have been downgraded
+    # to 'tfidf' if BERT failed to initialize) rather than the raw config value.
+    if matching_mode is None:
+        matching_mode = _effective_matching_mode
+    
+    matching_mode = matching_mode.lower()
+    logger.info(f"Ranking candidates with mode: {matching_mode}")
+    
+    # Get cached data
     df, vect, X, _ = get_cached_data()
     if df is None:
+        logger.error("Failed to get cached data")
         return pd.DataFrame()
 
     def parse_num(x, default):
@@ -436,6 +887,7 @@ def rank_candidates(
         except Exception:
             return default
 
+    # Apply filters
     filtered_df = filter_by_category(job_desc, df)
     if selected_categories:
         filtered_df = filtered_df[filtered_df["Category"].isin(selected_categories)]
@@ -463,60 +915,198 @@ def rank_candidates(
         mask_exc = filtered_df["Skills"].fillna("").apply(lambda s: any(p.search(s) for p in patt_any))
         filtered_df = filtered_df[~mask_exc]
 
+    # Clean job description
     jd_clean = clean_text(job_desc)
-    jd_vec = vect.transform([jd_clean])
-    sims = (X @ jd_vec.T).toarray().ravel()
-
-    mask = df.index.isin(filtered_df.index)
-    sims = sims[mask]
+    
+    # Initialize similarity scores
+    tfidf_sims = None
+    bert_sims = None
+    
+    # Compute TF-IDF similarity (if needed)
+    if matching_mode in ["tfidf", "hybrid"]:
+        jd_vec = vect.transform([jd_clean])
+        tfidf_sims = (X @ jd_vec.T).toarray().ravel()
+        mask = df.index.isin(filtered_df.index)
+        tfidf_sims = tfidf_sims[mask]
+    
+    # Compute BERT similarity (if needed and available)
+    if matching_mode in ["bert", "hybrid"] and _bert_initialized:
+        try:
+            logger.debug(f"Computing BERT similarity for {len(filtered_df)} candidates")
+            encoder = get_bert_encoder()
+            cache = get_embedding_cache()
+            
+            if encoder and cache:
+                # Encode job description
+                logger.debug("Encoding job description with BERT...")
+                jd_embedding = encoder.encode(jd_clean, normalize=True)
+                logger.debug(f"Job description encoded: shape={jd_embedding.shape}")
+                
+                # Get candidate embeddings from cache
+                candidate_ids = filtered_df["Candidate_ID"].tolist()
+                logger.debug(f"Retrieving {len(candidate_ids)} candidate embeddings from cache...")
+                
+                try:
+                    candidate_embeddings = cache.get_all_embeddings(candidate_ids)
+                    logger.debug(f"Retrieved embeddings: shape={candidate_embeddings.shape}")
+                except ValueError as cache_error:
+                    # Embeddings not in cache - encode on-demand
+                    logger.warning(f"Embeddings not in cache: {cache_error}")
+                    logger.info("Encoding candidates on-demand (this may take a moment)...")
+                    candidate_texts = filtered_df["_combined_text"].tolist()
+                    candidate_embeddings = encoder.encode(candidate_texts, batch_size=8, normalize=True)
+                    logger.info(f"Encoded {len(candidate_embeddings)} candidates on-demand")
+                
+                # Compute similarities
+                logger.debug("Computing batch cosine similarities...")
+                bert_sims = SimilarityCalculator.batch_cosine_similarity(
+                    candidate_embeddings, 
+                    jd_embedding
+                )
+                logger.debug(f"BERT similarities computed: min={bert_sims.min():.4f}, max={bert_sims.max():.4f}")
+            else:
+                logger.warning("BERT encoder or cache not available, falling back to TF-IDF")
+                matching_mode = "tfidf"
+                if tfidf_sims is None:
+                    jd_vec = vect.transform([jd_clean])
+                    tfidf_sims = (X @ jd_vec.T).toarray().ravel()
+                    mask = df.index.isin(filtered_df.index)
+                    tfidf_sims = tfidf_sims[mask]
+        except ValueError as ve:
+            # Handle missing embeddings gracefully
+            logger.error(f"BERT similarity computation failed (missing embeddings): {ve}")
+            logger.warning("Falling back to TF-IDF mode due to missing embeddings")
+            matching_mode = "tfidf"
+            if tfidf_sims is None:
+                jd_vec = vect.transform([jd_clean])
+                tfidf_sims = (X @ jd_vec.T).toarray().ravel()
+                mask = df.index.isin(filtered_df.index)
+                tfidf_sims = tfidf_sims[mask]
+        except Exception as e:
+            logger.error(f"BERT similarity computation failed: {e}", exc_info=True)
+            logger.warning("Falling back to TF-IDF mode")
+            matching_mode = "tfidf"
+            if tfidf_sims is None:
+                jd_vec = vect.transform([jd_clean])
+                tfidf_sims = (X @ jd_vec.T).toarray().ravel()
+                mask = df.index.isin(filtered_df.index)
+                tfidf_sims = tfidf_sims[mask]
+    elif matching_mode in ["bert", "hybrid"] and not _bert_initialized:
+        logger.warning(f"BERT not initialized, falling back to TF-IDF (requested mode: {matching_mode})")
+        matching_mode = "tfidf"
+        if tfidf_sims is None:
+            jd_vec = vect.transform([jd_clean])
+            tfidf_sims = (X @ jd_vec.T).toarray().ravel()
+            mask = df.index.isin(filtered_df.index)
+            tfidf_sims = tfidf_sims[mask]
+    
+    # Combine similarities based on mode
     filtered_df = filtered_df.copy()
-
-    final = wt_text * np.array(sims) + wt_exp * filtered_df["_exp_score"].values
+    
+    if matching_mode == "bert" and bert_sims is not None:
+        logger.info("Using BERT-only similarity scores")
+        text_sims = bert_sims
+    elif matching_mode == "hybrid" and bert_sims is not None and tfidf_sims is not None:
+        logger.info("Using hybrid (BERT + TF-IDF) similarity scores")
+        text_sims = (bert_sims + tfidf_sims) / 2.0
+    else:  # tfidf mode or fallback
+        logger.info("Using TF-IDF-only similarity scores")
+        text_sims = tfidf_sims
+    
+    logger.debug(f"Text similarities: min={text_sims.min():.4f}, max={text_sims.max():.4f}, mean={text_sims.mean():.4f}")
+    
+    # Compute final scores
+    final = wt_text * np.array(text_sims) + wt_exp * filtered_df["_exp_score"].values
     order = np.argsort(-final)
     take = order[:top_n]
 
     out = filtered_df.iloc[take].copy()
-    out["Text_Similarity"] = np.round(sims[take], 4)
+    logger.info(f"Ranked {len(out)} candidates (requested top {top_n})")
+    
+    # Add score columns based on mode
+    if matching_mode == "hybrid" and bert_sims is not None and tfidf_sims is not None:
+        out["BERT_Similarity"] = np.round(bert_sims[take], 4)
+        out["TF-IDF_Similarity"] = np.round(tfidf_sims[take], 4)
+        out["Text_Similarity"] = np.round(text_sims[take], 4)  # Combined
+    elif matching_mode == "bert" and bert_sims is not None:
+        out["BERT_Similarity"] = np.round(bert_sims[take], 4)
+        out["Text_Similarity"] = np.round(text_sims[take], 4)
+    else:  # tfidf mode
+        out["Text_Similarity"] = np.round(text_sims[take], 4)
+    
     out["Experience_Score"] = np.round(filtered_df["_exp_score"].values[take], 4)
     out["Final_Match_Score"] = np.round(final[take], 4)
 
+    # Handle uploaded resume
     if uploaded_resume:
+        logger.info("Processing uploaded resume")
         insights = uploaded_resume.get("insights", {})
         resume_score = insights.get("resume_score", 0)
         exp_score = min(1.0, insights.get("experience_years", 0) / 15)
 
         uploaded_text = uploaded_resume.get("text", "")
-        if uploaded_text and job_desc:
-            uploaded_text_clean = clean_text(uploaded_text)
+        uploaded_text_clean = clean_text(uploaded_text)
+        
+        # Compute uploaded resume similarity
+        uploaded_tfidf_sim = None
+        uploaded_bert_sim = None
+        
+        if matching_mode in ["tfidf", "hybrid"]:
+            logger.debug("Computing TF-IDF similarity for uploaded resume")
             uploaded_vec = vect.transform([uploaded_text_clean])
-            uploaded_similarity = (uploaded_vec @ jd_vec.T).toarray().ravel()[0]
+            jd_vec = vect.transform([jd_clean])
+            uploaded_tfidf_sim = (uploaded_vec @ jd_vec.T).toarray().ravel()[0]
+            logger.debug(f"Uploaded resume TF-IDF similarity: {uploaded_tfidf_sim:.4f}")
+        
+        if matching_mode in ["bert", "hybrid"] and _bert_initialized:
+            try:
+                logger.debug("Computing BERT similarity for uploaded resume")
+                encoder = get_bert_encoder()
+                if encoder:
+                    uploaded_embedding = encoder.encode(uploaded_text_clean, normalize=True)
+                    jd_embedding = encoder.encode(jd_clean, normalize=True)
+                    uploaded_bert_sim = SimilarityCalculator.cosine_similarity(
+                        uploaded_embedding,
+                        jd_embedding
+                    )
+                    logger.debug(f"Uploaded resume BERT similarity: {uploaded_bert_sim:.4f}")
+            except Exception as e:
+                logger.error(f"BERT encoding failed for uploaded resume: {e}", exc_info=True)
+        
+        # Determine uploaded similarity based on mode
+        if matching_mode == "bert" and uploaded_bert_sim is not None:
+            uploaded_similarity = uploaded_bert_sim
+        elif matching_mode == "hybrid" and uploaded_bert_sim is not None and uploaded_tfidf_sim is not None:
+            uploaded_similarity = (uploaded_bert_sim + uploaded_tfidf_sim) / 2.0
+        elif uploaded_tfidf_sim is not None:
+            uploaded_similarity = uploaded_tfidf_sim
         else:
-            if uploaded_text:
-                uploaded_text_clean = clean_text(uploaded_text)
-                uploaded_vec = vect.transform([uploaded_text_clean])
-                skills_text = " ".join(insights.get("skills", []))
-                if skills_text:
-                    skills_vec = vect.transform([skills_text])
-                    uploaded_similarity = (uploaded_vec @ skills_vec.T).toarray().ravel()[0]
-                else:
-                    uploaded_similarity = 0.3
-            else:
-                uploaded_similarity = resume_score / 100
+            uploaded_similarity = resume_score / 100
 
-        uploaded_row = pd.DataFrame([
-            {
-                "Candidate_ID": "UPLOADED",
-                "Name": insights.get("name", f"Uploaded Resume ({uploaded_resume.get('filename', 'resume.pdf')})"),
-                "Email": insights.get("email", ""),
-                "Experience_Years": insights.get("experience_years", 0),
-                "Skills": ", ".join(insights.get("skills", [])),
-                "Category": "Uploaded",
-                "Resume_Summary": insights.get("summary", ""),
-                "Text_Similarity": uploaded_similarity,
-                "Experience_Score": exp_score,
-                "Final_Match_Score": (wt_text * uploaded_similarity) + (wt_exp * exp_score),
-            }
-        ])
+        uploaded_row_data = {
+            "Candidate_ID": "UPLOADED",
+            "Name": insights.get("name", f"Uploaded Resume ({uploaded_resume.get('filename', 'resume.pdf')})"),
+            "Email": insights.get("email", ""),
+            "Experience_Years": insights.get("experience_years", 0),
+            "Skills": ", ".join(insights.get("skills", [])),
+            "Category": "Uploaded",
+            "Resume_Summary": insights.get("summary", ""),
+            "Experience_Score": exp_score,
+            "Final_Match_Score": (wt_text * uploaded_similarity) + (wt_exp * exp_score),
+        }
+        
+        # Add similarity columns based on mode
+        if matching_mode == "hybrid" and uploaded_bert_sim is not None and uploaded_tfidf_sim is not None:
+            uploaded_row_data["BERT_Similarity"] = uploaded_bert_sim
+            uploaded_row_data["TF-IDF_Similarity"] = uploaded_tfidf_sim
+            uploaded_row_data["Text_Similarity"] = uploaded_similarity
+        elif matching_mode == "bert" and uploaded_bert_sim is not None:
+            uploaded_row_data["BERT_Similarity"] = uploaded_bert_sim
+            uploaded_row_data["Text_Similarity"] = uploaded_similarity
+        else:
+            uploaded_row_data["Text_Similarity"] = uploaded_similarity
+        
+        uploaded_row = pd.DataFrame([uploaded_row_data])
 
         out = pd.concat([uploaded_row, out], ignore_index=True)
         out = out.sort_values("Final_Match_Score", ascending=False).head(top_n + 1)
@@ -525,7 +1115,8 @@ def rank_candidates(
     out = out.reset_index(drop=True)
     out.insert(0, "Rank", np.arange(1, len(out) + 1))
 
-    cols = [
+    # Define column order based on mode
+    base_cols = [
         "Rank",
         "Candidate_ID",
         "Name",
@@ -534,334 +1125,596 @@ def rank_candidates(
         "Skills",
         "Category",
         "Final_Match_Score",
-        "Text_Similarity",
-        "Experience_Score",
     ]
-    present_cols = [c for c in cols if c in out.columns]
+    
+    if matching_mode == "hybrid" and "BERT_Similarity" in out.columns:
+        base_cols.extend(["BERT_Similarity", "TF-IDF_Similarity", "Text_Similarity"])
+    elif matching_mode == "bert" and "BERT_Similarity" in out.columns:
+        base_cols.extend(["BERT_Similarity", "Text_Similarity"])
+    else:
+        base_cols.append("Text_Similarity")
+    
+    base_cols.append("Experience_Score")
+    
+    present_cols = [c for c in base_cols if c in out.columns]
     return out[present_cols]
 
-# ------------------------- UI Functions -------------------------
-def show_dataset_analysis():
-    """Display dataset analysis with individual graphs in sequence"""
-    df, _, _, _ = get_cached_data()
-    if df is None:
-        st.warning("Dataset not loaded. Check CSV_PATH and file existence.")
-    else:
-        st.write("### Shape of Dataset")
-        st.write(f"Rows: {df.shape[0]}, Columns: {df.shape[1]}")
+# ------------------------- Flask App -------------------------
+app = Flask(__name__)
 
-        st.write("### First 10 Rows")
-        st.dataframe(df.head(10), use_container_width=True)
+# Apply configuration from Config class
+app.config['SECRET_KEY'] = Config.SECRET_KEY
+app.config['MAX_CONTENT_LENGTH'] = Config.MAX_CONTENT_LENGTH
+app.config['SESSION_COOKIE_SECURE'] = Config.SESSION_COOKIE_SECURE
+app.config['SESSION_COOKIE_HTTPONLY'] = Config.SESSION_COOKIE_HTTPONLY
+app.config['SESSION_COOKIE_SAMESITE'] = Config.SESSION_COOKIE_SAMESITE
 
-        # 1. Candidate Categories Distribution
-        st.write("### Candidate Categories Distribution")
-        try:
-            fig, ax = plt.subplots()
-            sns.countplot(x="Category", data=df, order=df["Category"].value_counts().index, ax=ax)
-            plt.xticks(rotation=45)
-            st.pyplot(fig)
-        except Exception as e:
-            st.warning(f"Cannot plot category distribution: {e}")
+# Set secret_key for backward compatibility
+app.secret_key = Config.SECRET_KEY
 
-        # 2. Experience Distribution
-        st.write("### Experience Distribution")
-        try:
-            fig, ax = plt.subplots()
-            sns.histplot(df["Experience_Years"], bins=20, kde=True, ax=ax)
-            st.pyplot(fig)
-        except Exception as e:
-            st.warning(f"Cannot plot experience distribution: {e}")
 
-        # 3. Experience by Category (Boxplot)
-        st.write("### Experience by Category (Boxplot)")
-        try:
-            fig, ax = plt.subplots()
-            sns.boxplot(x="Category", y="Experience_Years", data=df, ax=ax)
-            plt.xticks(rotation=45)
-            st.pyplot(fig)
-        except Exception as e:
-            st.warning(f"Cannot plot boxplot: {e}")
+@app.after_request
+def add_security_headers(response):
+    """Add security headers to every HTTP response (Requirement 15.4).
 
-        # 4. Top Skills (Frequency)
-        st.write("### Top Skills (Frequency)")
-        try:
-            skills_series = df.get("Skills", pd.Series(dtype=str)).fillna("").astype(str)
-            tokens = []
-            for row in skills_series:
-                tokens.extend([t.strip().lower() for t in row.split(",") if t.strip()])
-            if tokens:
-                vc = pd.Series(tokens).value_counts().head(20)
-                fig, ax = plt.subplots(figsize=(6, 5))
-                vc.sort_values().plot(kind="barh", ax=ax, color="#60a5fa")
-                ax.set_xlabel("Count")
-                ax.set_ylabel("Skill")
-                st.pyplot(fig)
-            else:
-                st.info("No skills found to plot.")
-        except Exception as e:
-            st.warning(f"Cannot plot skills frequency: {e}")
+    Headers applied:
+    - X-Content-Type-Options: prevents MIME-type sniffing attacks.
+    - X-Frame-Options: blocks the app from being embedded in iframes (clickjacking).
+    - Content-Security-Policy: restricts resource origins to reduce XSS attack surface.
+    - X-XSS-Protection: enables the browser's built-in XSS filter (legacy browsers).
+    - Referrer-Policy: limits referrer information sent with cross-origin requests.
+    """
+    response.headers['X-Content-Type-Options'] = 'nosniff'
+    response.headers['X-Frame-Options'] = 'DENY'
+    response.headers['Content-Security-Policy'] = (
+        "default-src 'self'; "
+        "script-src 'self' 'unsafe-inline'; "
+        "style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data:;"
+    )
+    response.headers['X-XSS-Protection'] = '1; mode=block'
+    response.headers['Referrer-Policy'] = 'strict-origin-when-cross-origin'
+    return response
 
-        # 5. Email Domains (Top 10)
-        st.write("### Email Domains (Top 10)")
-        try:
-            domains = (
-                df.get("Email", pd.Series(dtype=str))
-                  .dropna().astype(str).str.extract(r"@(.+)")[0].str.lower()
+
+@app.errorhandler(413)
+def request_entity_too_large(error):
+    """Handle HTTP 413 Request Entity Too Large errors.
+
+    Flask raises this automatically when an uploaded file exceeds
+    app.config['MAX_CONTENT_LENGTH'] (currently 200 MB).
+    """
+    max_mb = Config.MAX_CONTENT_LENGTH // (1024 * 1024)
+    logger.warning("HTTP 413: Upload rejected — file exceeds %d MB limit.", max_mb)
+    return jsonify({
+        'error': 'File too large',
+        'message': (
+            f'The uploaded file exceeds the maximum allowed size of {max_mb} MB. '
+            'Please upload a smaller file and try again.'
+        )
+    }), 413
+
+
+@app.errorhandler(MemoryError)
+def handle_memory_error(exc):
+    """Handle MemoryError — raised when the process runs out of available RAM.
+
+    Logs the event with resource_type="memory" and the configured memory limit
+    so operators can diagnose OOM conditions in production (Requirement 10.6).
+
+    Returns HTTP 503 Service Unavailable so load-balancers / clients know the
+    server is temporarily unable to fulfil the request.
+    """
+    memory_limit_mb = Config.MAX_CONTENT_LENGTH // (1024 * 1024)
+    logger.error(
+        "Resource limit exceeded: resource_type=memory, limit=%dMB — %s",
+        memory_limit_mb,
+        exc,
+        exc_info=True,
+    )
+    return jsonify({
+        'error': 'Service temporarily unavailable',
+        'message': (
+            'The server ran out of memory while processing your request. '
+            'Try reducing the batch size or uploading a smaller file.'
+        )
+    }), 503
+
+
+@app.errorhandler(TimeoutError)
+def handle_timeout_error(exc):
+    """Handle TimeoutError — raised when an operation exceeds its time limit.
+
+    Logs the event with resource_type="timeout" and the gunicorn worker timeout
+    value so operators can identify slow operations (Requirement 10.6).
+
+    Returns HTTP 504 Gateway Timeout to signal that the upstream operation did
+    not complete within the allowed time window.
+    """
+    # Gunicorn default timeout is 120 s (configured in Procfile / render.yaml).
+    timeout_seconds = int(os.environ.get("GUNICORN_TIMEOUT", 120))
+    logger.error(
+        "Resource limit exceeded: resource_type=timeout, limit=%ds — %s",
+        timeout_seconds,
+        exc,
+        exc_info=True,
+    )
+    return jsonify({
+        'error': 'Request timed out',
+        'message': (
+            'The request took too long to process and was cancelled. '
+            'Try a smaller dataset or a simpler query.'
+        )
+    }), 504
+
+
+@app.errorhandler(OSError)
+def handle_os_error(exc):
+    """Handle OSError — specifically catches ENOSPC (disk full) conditions.
+
+    When errno is ENOSPC the handler logs resource_type="disk" together with
+    the cache directory path so operators know which volume is full
+    (Requirement 10.6).  All other OSError variants are re-raised so the
+    global Exception handler can process them normally.
+
+    Returns HTTP 507 Insufficient Storage for disk-full errors.
+    """
+    import errno as errno_module
+    if exc.errno == errno_module.ENOSPC:
+        cache_dir = Config.CACHE_DIR
+        logger.error(
+            "Resource limit exceeded: resource_type=disk, path=%s — no space left on device: %s",
+            cache_dir,
+            exc,
+            exc_info=True,
+        )
+        return jsonify({
+            'error': 'Insufficient storage',
+            'message': (
+                'The server disk is full and cannot complete the request. '
+                'Please contact the administrator to free up disk space.'
             )
-            vc = domains.value_counts().head(10)
-            if not vc.empty:
-                fig, ax = plt.subplots(figsize=(6, 4))
-                vc.sort_values().plot(kind="barh", ax=ax, color="#34d399")
-                ax.set_xlabel("Count")
-                ax.set_ylabel("Domain")
-                st.pyplot(fig)
-            else:
-                st.info("No email domains to plot.")
-        except Exception as e:
-            st.warning(f"Cannot plot email domains: {e}")
+        }), 507
+    # Not a disk-full error — let the global handler deal with it.
+    return handle_unexpected_exception(exc)
 
-        # 6. Correlation Heatmap
-        st.write("### Correlation Heatmap")
-        try:
-            fig, ax = plt.subplots()
-            sns.heatmap(df.corr(numeric_only=True), annot=False, cmap="coolwarm", ax=ax)
-            st.pyplot(fig)
-        except Exception as e:
-            st.warning(f"Cannot plot correlation heatmap: {e}")
 
-        # 7. Category Share (Pie)
-        st.write("### Category Share (Pie)")
-        try:
-            vc = df["Category"].fillna("Unknown").value_counts()
-            fig, ax = plt.subplots(figsize=(5, 5))
-            ax.pie(vc.values, labels=vc.index, autopct="%1.1f%%", startangle=90)
-            ax.axis("equal")
-            st.pyplot(fig)
-        except Exception as e:
-            st.warning(f"Cannot plot category share: {e}")
+@app.errorhandler(Exception)
+def handle_unexpected_exception(exc):
+    """Catch-all handler for any unhandled exception (Requirements 12.5, 12.6).
 
-def show_talent_ai():
-    """Display the talent AI functionality"""
+    Before falling through to the generic 500 response, checks for resource
+    limit conditions that may arrive as plain Exception subclasses rather than
+    the specific types registered above (e.g. MemoryError raised inside a
+    C-extension, or an OSError with ENOSPC from a library call).
+
+    Logs the full exception with stack trace so operators can diagnose the
+    problem from application logs, but returns only a generic message to the
+    caller so that internal details (file paths, stack traces, configuration)
+    are never exposed to users.
+
+    Args:
+        exc: The unhandled exception that propagated to Flask.
+
+    Returns:
+        A JSON response with an appropriate HTTP status code and a safe message.
+    """
+    import errno as errno_module
+
+    # --- Resource limit checks (Requirement 10.6) ---
+    if isinstance(exc, MemoryError):
+        return handle_memory_error(exc)
+
+    if isinstance(exc, TimeoutError):
+        return handle_timeout_error(exc)
+
+    if isinstance(exc, OSError) and exc.errno == errno_module.ENOSPC:
+        return handle_os_error(exc)
+
+    # --- Generic unhandled exception ---
+    logger.error(
+        "Unhandled exception: %s",
+        exc,
+        exc_info=True,
+    )
+    return jsonify({
+        'error': 'An unexpected error occurred. Please try again later.'
+    }), 500
+
+
+# Validate and log configuration at startup (runs under both gunicorn and __main__)
+logger.info("Starting AI Resume Screening Application...")
+try:
+    Config.validate()
+    Config.log_config()
+except ValueError as e:
+    logger.error(f"Configuration validation failed: {e}")
+    logger.error("Please check your environment variables and try again.")
+
+# Global variable to store last ranking results (avoids session size limits)
+_last_ranking_results = None
+
+@app.route('/')
+def index():
     df, _, _, _ = get_cached_data()
     if df is None:
-        st.error("Dataset not loaded. Please check your CSV file.")
-        return
-   
-    sample_count = len(df)
+        logger.error("Index route: candidate data not available — returning 503")
+        return jsonify({
+            'error': 'Service temporarily unavailable',
+            'message': (
+                'The candidate dataset could not be loaded. '
+                'Please check that candidates.csv exists and try again later.'
+            )
+        }), 503
+    
     categories = get_categories(df)
+    sample_count = len(df)
+    
+    return render_template('index.html', 
+                         categories=categories,
+                         sample_count=sample_count,
+                         top_n_default=TOP_N_DEFAULT)
 
-    with st.sidebar:
-        st.header("Filters")
-        top_n = st.number_input("Top N candidates", min_value=10, max_value=1000, value=TOP_N_DEFAULT, step=10)
-        col_w1, col_w2 = st.columns(2)
-        with col_w1:
-            wt_text = st.number_input("Weight: Text", min_value=0.0, max_value=1.0, value=0.85, step=0.05)
-        with col_w2:
-            wt_exp = st.number_input("Weight: Experience", min_value=0.0, max_value=1.0, value=0.15, step=0.05)
+@app.route('/rank', methods=['POST'])
+def rank():
+    try:
+        job_desc = request.form.get('job_description', '').strip()
+        if not job_desc:
+            return jsonify({'error': 'Please enter a Job Description'}), 400
+        
+        top_n = int(request.form.get('top_n', TOP_N_DEFAULT))
+        wt_text = float(request.form.get('wt_text', 0.85))
+        wt_exp = float(request.form.get('wt_exp', 0.15))
+        min_exp = request.form.get('min_exp', '')
+        max_exp = request.form.get('max_exp', '')
+        include_skills = request.form.get('include_skills', '')
+        exclude_skills = request.form.get('exclude_skills', '')
+        selected_categories = request.form.getlist('selected_categories')
+        matching_mode = request.form.get('matching_mode', _effective_matching_mode)  # NEW
+        
+        uploaded_resume_data = session.get('uploaded_resume_data')
+        
+        results = rank_candidates(
+            job_desc=job_desc,
+            top_n=top_n,
+            wt_text=wt_text,
+            wt_exp=wt_exp,
+            min_exp=min_exp,
+            max_exp=max_exp,
+            include_skills=include_skills,
+            exclude_skills=exclude_skills,
+            selected_categories=selected_categories,
+            uploaded_resume=uploaded_resume_data,
+            matching_mode=matching_mode,  # NEW
+        )
+        
+        # Store results in global variable (avoids session size limits)
+        global _last_ranking_results
+        _last_ranking_results = results
+        
+        return jsonify({
+            'success': True,
+            'html': results.to_html(classes='table table-dark table-striped table-hover', index=False, border=0)
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
-        min_exp = st.text_input("Min experience (years)")
-        max_exp = st.text_input("Max experience (years)")
-        selected_categories = st.multiselect("Categories", options=categories)
-        include_skills = st.text_input("Include skills (comma separated)")
-        exclude_skills = st.text_input("Exclude skills (comma separated)")
+@app.route('/upload_resume', methods=['POST'])
+def upload_resume():
+    try:
+        if 'resume' not in request.files:
+            return jsonify({'error': 'No file uploaded'}), 400
 
-    col_left, col_right = st.columns([2, 1])
+        file = request.files['resume']
+        if file.filename == '':
+            return jsonify({'error': 'No file selected'}), 400
 
-    with col_left:
-        # Preset JD chips
-        st.markdown("*Preset JDs* — click to autofill:")
-        chip_cols = st.columns(5)
-        jd_presets = [
-            ("Data\nScientist", "Looking for a Data Scientist with strong Python, SQL, Machine Learning, NLP experience to build models and dashboards."),
-            ("Backend\nDeveloper", "Hiring a Backend Developer skilled in Java, Spring Boot, Microservices, REST APIs, SQL and cloud deployment."),
-            ("Frontend\nDeveloper", "Seeking a Frontend Developer with React, JavaScript, HTML, CSS, responsive design and testing skills."),
-            ("Data\nAnalyst", "Need a Data Analyst proficient in Excel, SQL, Tableau/Power BI, data cleaning and visualization."),
-            ("DevOps\nEngineer", "Looking for a DevOps Engineer with Docker, Kubernetes, CI/CD, AWS/Azure and Terraform."),
-        ]
-        for (col, (label, text_val)) in zip(chip_cols, jd_presets):
-            with col:
-                if st.button(label, key=f"chip_{label}"):
-                    st.session_state["jd_text"] = text_val
+        if not file.filename.lower().endswith('.pdf'):
+            return jsonify({'error': 'Only PDF files are allowed. Please upload a .pdf file.'}), 400
 
-        jd = st.text_area(
-            "Job Description",
-            placeholder="Looking for a Data Scientist with Python, SQL, Machine Learning, NLP experience...",
-            height=220,
-            key="jd_text",
+        # Read file bytes once so we can pass a BytesIO to the extractor
+        # (avoids double-seek issues with Werkzeug FileStorage objects).
+        raw_bytes = file.read()
+        buf = io.BytesIO(raw_bytes)
+
+        # --- PDF extraction (may raise PDFExtractionError) ---
+        try:
+            text = extract_text_from_pdf(buf)
+        except PDFExtractionError as pdf_err:
+            # Log the full detail (including stack trace) for operators.
+            logger.error(
+                "PDF extraction failed for file '%s': %s",
+                secure_filename(file.filename),
+                pdf_err.detail,
+                exc_info=True,
+            )
+            # Return a user-friendly message without internal details.
+            return jsonify({'error': pdf_err.user_message}), 400
+
+        # Store raw text for debugging
+        session['raw_resume_text'] = text[:1000]  # Store first 1000 chars
+
+        insights = extract_insights_from_resume(text)
+
+        if not insights.get("summary") and text:
+            compact = " ".join([ln.strip() for ln in text.splitlines() if ln.strip()])
+            insights["summary"] = compact[:300]
+
+        job_desc = request.form.get('job_description', '')
+        if job_desc:
+            insights["resume_score"] = calculate_resume_score(insights, job_desc)
+        else:
+            insights["resume_score"] = 0
+
+        session['uploaded_resume_data'] = {
+            "insights": insights,
+            "text": text,
+            "filename": secure_filename(file.filename),
+        }
+
+        return jsonify({
+            'success': True,
+            'insights': {
+                'name': insights.get('name') or 'Not found',
+                'email': insights.get('email') or '',
+                'experience_years': insights.get('experience_years', 0),
+                'skills_count': len(insights.get('skills', [])),
+                'resume_score': insights.get('resume_score', 0)
+            },
+            'debug_text': text[:500]  # Return first 500 chars for debugging
+        })
+    except Exception as e:
+        # Catch-all for unexpected errors in this route (e.g. session write
+        # failures, insight extraction crashes).  Log with full stack trace
+        # but return a generic message so internal details are never exposed.
+        logger.error(
+            "Unexpected error in /upload_resume: %s", e, exc_info=True
+        )
+        return jsonify({
+            'error': 'An unexpected error occurred while processing your resume. Please try again.'
+        }), 500
+
+@app.route('/download_csv')
+def download_csv():
+    try:
+        global _last_ranking_results
+        
+        if _last_ranking_results is None or _last_ranking_results.empty:
+            return "No ranking results available. Please rank candidates first.", 400
+        
+        csv_bytes = _last_ranking_results.to_csv(index=False).encode('utf-8')
+        
+        return send_file(
+            io.BytesIO(csv_bytes),
+            mimetype='text/csv',
+            as_attachment=True,
+            download_name='ranked_candidates.csv'
+        )
+    except Exception as e:
+        logger.error(f"Download CSV error: {e}", exc_info=True)
+        return str(e), 500
+
+@app.route('/analysis')
+def analysis():
+    df, _, _, _ = get_cached_data()
+    if df is None:
+        logger.error("Analysis route: candidate data not available — returning 503")
+        return jsonify({
+            'error': 'Service temporarily unavailable',
+            'message': (
+                'The candidate dataset could not be loaded. '
+                'Please check that candidates.csv exists and try again later.'
+            )
+        }), 503
+    
+    charts = {}
+    
+    # 1. Category Distribution
+    try:
+        fig, ax = plt.subplots(figsize=(10, 6))
+        sns.countplot(x="Category", data=df, order=df["Category"].value_counts().index, ax=ax, palette="viridis")
+        plt.xticks(rotation=45, ha='right')
+        plt.title("Candidate Categories Distribution")
+        plt.tight_layout()
+        buf = BytesIO()
+        plt.savefig(buf, format='png', dpi=100, bbox_inches='tight')
+        buf.seek(0)
+        charts['category_dist'] = base64.b64encode(buf.read()).decode('utf-8')
+        plt.close()
+    except:
+        charts['category_dist'] = None
+    
+    # 2. Experience Distribution
+    try:
+        fig, ax = plt.subplots(figsize=(10, 6))
+        sns.histplot(df["Experience_Years"], bins=20, kde=True, ax=ax, color="#60a5fa")
+        plt.title("Experience Distribution")
+        plt.xlabel("Years of Experience")
+        plt.tight_layout()
+        buf = BytesIO()
+        plt.savefig(buf, format='png', dpi=100, bbox_inches='tight')
+        buf.seek(0)
+        charts['exp_dist'] = base64.b64encode(buf.read()).decode('utf-8')
+        plt.close()
+    except:
+        charts['exp_dist'] = None
+    
+    # 3. Experience by Category
+    try:
+        fig, ax = plt.subplots(figsize=(10, 6))
+        sns.boxplot(x="Category", y="Experience_Years", data=df, ax=ax, palette="Set2")
+        plt.xticks(rotation=45, ha='right')
+        plt.title("Experience by Category")
+        plt.tight_layout()
+        buf = BytesIO()
+        plt.savefig(buf, format='png', dpi=100, bbox_inches='tight')
+        buf.seek(0)
+        charts['exp_by_cat'] = base64.b64encode(buf.read()).decode('utf-8')
+        plt.close()
+    except:
+        charts['exp_by_cat'] = None
+    
+    # 4. Top Skills
+    try:
+        skills_series = df.get("Skills", pd.Series(dtype=str)).fillna("").astype(str)
+        tokens = []
+        for row in skills_series:
+            tokens.extend([t.strip().lower() for t in row.split(",") if t.strip()])
+        if tokens:
+            vc = pd.Series(tokens).value_counts().head(20)
+            fig, ax = plt.subplots(figsize=(10, 8))
+            vc.sort_values().plot(kind="barh", ax=ax, color="#60a5fa")
+            ax.set_xlabel("Count")
+            ax.set_ylabel("Skill")
+            plt.title("Top 20 Skills")
+            plt.tight_layout()
+            buf = BytesIO()
+            plt.savefig(buf, format='png', dpi=100, bbox_inches='tight')
+            buf.seek(0)
+            charts['top_skills'] = base64.b64encode(buf.read()).decode('utf-8')
+            plt.close()
+    except:
+        charts['top_skills'] = None
+    
+    # 5. Email Domains
+    try:
+        domains = (
+            df.get("Email", pd.Series(dtype=str))
+              .dropna().astype(str).str.extract(r"@(.+)")[0].str.lower()
+        )
+        vc = domains.value_counts().head(10)
+        if not vc.empty:
+            fig, ax = plt.subplots(figsize=(10, 6))
+            vc.sort_values().plot(kind="barh", ax=ax, color="#34d399")
+            ax.set_xlabel("Count")
+            ax.set_ylabel("Domain")
+            plt.title("Top 10 Email Domains")
+            plt.tight_layout()
+            buf = BytesIO()
+            plt.savefig(buf, format='png', dpi=100, bbox_inches='tight')
+            buf.seek(0)
+            charts['email_domains'] = base64.b64encode(buf.read()).decode('utf-8')
+            plt.close()
+    except:
+        charts['email_domains'] = None
+    
+    # 6. Category Share Pie
+    try:
+        vc = df["Category"].fillna("Unknown").value_counts()
+        fig, ax = plt.subplots(figsize=(8, 8))
+        ax.pie(vc.values, labels=vc.index, autopct="%1.1f%%", startangle=90)
+        ax.axis("equal")
+        plt.title("Category Share")
+        plt.tight_layout()
+        buf = BytesIO()
+        plt.savefig(buf, format='png', dpi=100, bbox_inches='tight')
+        buf.seek(0)
+        charts['category_pie'] = base64.b64encode(buf.read()).decode('utf-8')
+        plt.close()
+    except:
+        charts['category_pie'] = None
+    
+    return render_template('analysis.html', 
+                         charts=charts,
+                         total_rows=len(df),
+                         total_cols=len(df.columns))
+
+@app.route('/health')
+def health():
+    """Health check endpoint for deployment platforms.
+    
+    Returns HTTP 200 with status='healthy' when the application is ready,
+    or HTTP 503 with status='unhealthy' when critical components are unavailable.
+    """
+    try:
+        checks = {}
+
+        # --- data_loaded: candidates.csv loaded into memory ---
+        df, _, _, _ = get_cached_data()
+        data_loaded = df is not None and len(df) > 0
+        checks['data_loaded'] = data_loaded
+
+        # --- BERT availability and initialization status ---
+        checks['bert_available'] = bool(BERT_AVAILABLE)
+        checks['bert_initialized'] = bool(_bert_initialized)
+
+        # --- Embedding cache status ---
+        cache = get_embedding_cache() if BERT_AVAILABLE else None
+        if cache is not None:
+            checks['cache_available'] = True
+            try:
+                # Count cached embeddings if the cache exposes that information
+                cached_count = len(cache) if hasattr(cache, '__len__') else (
+                    len(cache.embeddings) if hasattr(cache, 'embeddings') and cache.embeddings is not None else 0
+                )
+            except Exception:
+                cached_count = 0
+            checks['cached_embeddings'] = cached_count
+        else:
+            checks['cache_available'] = False
+            checks['cached_embeddings'] = 0
+
+        # --- Current matching mode (reflects actual capability after BERT init) ---
+        checks['matching_mode'] = _effective_matching_mode
+
+        # Determine overall health: data must be loaded for the app to be useful
+        is_healthy = data_loaded
+        status_code = 200 if is_healthy else 503
+        overall_status = 'healthy' if is_healthy else 'unhealthy'
+
+        response_body = {
+            'status': overall_status,
+            'timestamp': datetime.utcnow().isoformat() + 'Z',
+            'checks': checks,
+        }
+
+        return jsonify(response_body), status_code
+
+    except Exception as e:
+        logger.error(f"Health check error: {e}", exc_info=True)
+        return jsonify({
+            'status': 'unhealthy',
+            'timestamp': datetime.utcnow().isoformat() + 'Z',
+            'error': str(e),
+        }), 503
+
+
+if __name__ == '__main__':
+    # Log startup configuration (debug mode, port, matching mode)
+    logger.info("=" * 60)
+    logger.info("Starting AI Resume Screening Application (dev server)")
+    logger.info(f"  Debug mode : {Config.FLASK_DEBUG}")
+    logger.info(f"  Port       : {Config.PORT}")
+    logger.info(f"  Matching   : {Config.MATCHING_MODE}")
+    logger.info(f"  Host       : 0.0.0.0")
+    logger.info("=" * 60)
+
+    # Pre-load candidate data at startup so the first request is fast.
+    # A missing or corrupt candidates.csv is logged clearly; the app still
+    # starts so the /health endpoint can report the unhealthy state.
+    logger.info("Loading candidate dataset at startup...")
+    try:
+        load_cached_data()
+        logger.info("Candidate dataset loaded successfully.")
+    except FileNotFoundError as e:
+        logger.error(
+            "STARTUP ERROR — candidates.csv not found. "
+            f"Detail: {e}. "
+            "The application will start but all ranking routes will return HTTP 503 "
+            "until the dataset is available."
+        )
+    except Exception as e:
+        logger.error(
+            f"STARTUP ERROR — failed to load candidate dataset: {e}. "
+            "The application will start but all ranking routes will return HTTP 503.",
+            exc_info=True,
         )
 
-        uploaded_resume_data = st.session_state.get("uploaded_resume_data")
+    # Initialize BERT system at startup
+    logger.info("Initializing BERT system...")
+    initialize_bert()
+    logger.info("Application ready")
 
-        run = st.button("Rank Candidates", type="primary")
-
-        if run:
-            if not jd.strip():
-                st.error("Please enter a Job Description")
-            else:
-                results = rank_candidates(
-                    job_desc=jd.strip(),
-                    top_n=int(top_n),
-                    wt_text=float(wt_text),
-                    wt_exp=float(wt_exp),
-                    min_exp=min_exp,
-                    max_exp=max_exp,
-                    include_skills=include_skills,
-                    exclude_skills=exclude_skills,
-                    selected_categories=selected_categories,
-                    uploaded_resume=uploaded_resume_data,
-                )
-
-                st.subheader("Top Ranked Candidates")
-                st.dataframe(results, use_container_width=True)
-
-                csv_bytes = results.to_csv(index=False).encode("utf-8")
-                st.download_button(
-                    label="Download CSV",
-                    data=csv_bytes,
-                    file_name="ranked_candidates.csv",
-                    mime="text/csv",
-                )
-
-                st.markdown(f"Rows in dataset: *{sample_count}*")
-
-    with col_right:
-        st.subheader("Upload Resume PDF")
-        st.caption(f"Maximum file size: 200MB")
-       
-        file = st.file_uploader("Choose a PDF", type=["pdf"], accept_multiple_files=False, help="Maximum file size: 200MB")
-        if file is not None:
-            try:
-                # Check file size before processing
-                if file.size > MAX_PDF_SIZE:
-                    st.error(f"File size ({file.size / (1024*1024):.1f}MB) exceeds maximum allowed size (200MB)")
-                else:
-                    # Read into a stable buffer to ensure proper parsing
-                    raw_bytes = file.read()
-                    buf = io.BytesIO(raw_bytes)
-                    text = extract_text_from_pdf(buf)
-                    insights = extract_insights_from_resume(text)
-                   
-                    # Fallback summary if NLP summary is empty
-                    if not insights.get("summary") and text:
-                        compact = " ".join([ln.strip() for ln in text.splitlines() if ln.strip()])
-                        insights["summary"] = compact[:300]
-                   
-                    if jd:
-                        insights["resume_score"] = calculate_resume_score(insights, jd)
-                    else:
-                        insights["resume_score"] = 0
-
-                    st.session_state["uploaded_resume_data"] = {
-                        "insights": insights,
-                        "text": text,
-                        "filename": file.name,
-                    }
-
-                    st.success("Resume analyzed successfully!")
-                    st.metric("Resume Score", f"{insights.get('resume_score', 0)}")
-                    st.write("Name:", insights.get("name") or "Not found")
-                    col_a, col_b = st.columns(2)
-                    with col_a:
-                        st.write("Experience:", f"{insights.get('experience_years', 0)} years")
-                    with col_b:
-                        st.write("Skills found:", len(insights.get("skills", [])))
-                    if insights.get("skills"):
-                        badges_html = "".join([f"<span class='badge'>{re.escape(sk).replace(chr(92), '')}</span>" for sk in insights["skills"][:12]])
-                        st.markdown(badges_html, unsafe_allow_html=True)
-                    if insights.get("summary"):
-                        st.markdown("<div class='soft-card' style='margin-top:8px'><b>Summary</b><br/>" + insights["summary"].replace("<", "&lt;").replace(">", "&gt;") + "</div>", unsafe_allow_html=True)
-
-            except Exception as e:
-                st.error(f"Upload failed: {e}")
-
-        if st.session_state.get("uploaded_resume_data"):
-            st.info("This uploaded resume will be included when you rank candidates.")
-
-    with st.expander("Dataset Status"):
-        st.write("File:", os.path.basename(CSV_PATH))
-        st.write("Rows:", sample_count)
-        st.write("Vectorizer: TF-IDF (1-2 grams, min_df=2)")
-        df, _, _, report = get_cached_data()
-        if report:
-            st.write("Validation Summary")
-            st.json(report)
-
-# ------------------------- Main App -------------------------
-def main():
-    st.set_page_config(page_title="Talent AI - Smart Resume Screening", layout="wide")
-   
-    # Note: Removed deprecated Streamlit option 'deprecation.showfileUploaderEncoding'
-
-    # Inject lightweight CSS
-    st.markdown(
-        """
-        <style>
-        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&display=swap');
-        html, body, [class*="css"], .stMarkdown, .stText, .stButton>button { font-family: 'Inter', sans-serif; }
-        .soft-card {background: #1a202c; color: #e2e8f0; border: 1px solid #2d3748; border-radius: 16px; padding: 16px; box-shadow: 0 10px 25px rgba(0,0,0,0.06);}
-        .chip {display:inline-block; padding:6px 10px; border-radius:8px; background:#f1f5f9; color:#0f172a; margin:4px; cursor:pointer; font-size:13px; border:1px solid #e2e8f0;}
-        .chip:hover {background:#e2e8f0;}
-        .badge {display:inline-block; padding:4px 8px; border-radius:8px; background:#eef2ff; color:#3730a3; margin:2px; font-size:12px;}
-        .metric-box {background:#ecfeff; border:1px solid #cffafe; border-radius:10px; padding:10px;}
-        .app-header {position: sticky; top: 0; z-index: 10; background: rgba(255,255,255,0.8); backdrop-filter: blur(8px); border-bottom: 1px solid #e5e7eb;}
-        .header-inner {display:flex; align-items:center; justify-content:space-between; padding: 12px 8px;}
-        .logo {height:40px; width:40px; border-radius:16px; display:flex; align-items:center; justify-content:center; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); position:relative; overflow:hidden;}
-        .logo:before {content:''; position:absolute; top:-50%; left:-50%; width:200%; height:200%; background: linear-gradient(45deg, transparent, rgba(255,255,255,0.12), transparent); animation: shimmer 3s infinite;}
-        @keyframes shimmer { 0% { transform: translateX(-100%) translateY(-100%) rotate(45deg);} 100% { transform: translateX(100%) translateY(100%) rotate(45deg);} }
-        .title {font-weight: 800; font-size: 22px; background: linear-gradient(90deg, #2563eb, #7c3aed); -webkit-background-clip: text; background-clip: text; color: transparent; margin:0;}
-        .subtitle {font-size: 12px; color: #64748b; margin:0;}
-        .stButton>button { border-radius: 12px; padding: 15px 20px; background: linear-gradient(90deg, #2563eb, #7c3aed); color: #fff; border: none; box-shadow: 0 8px 18px rgba(37,99,235,0.25); white-space: pre-line; font-size: 14px; min-height: 60px; }
-        .stButton>button:hover { filter: brightness(0.95); }
-        /*Equal Width for preset JD button */
-        .stButton {width:100%;}
-        .stButton button{width:100%; min-width:120px;}
-        /* Hide the default 200MB limit text */
-        .stFileUploader > div > div > div > div > small { display: none !important; }
-        .stFileUploader > div > div > div > div > div > small { display: none !important; }
-        .stFileUploader small { display: none !important; }
-        .stFileUploader div[data-testid="stFileUploader"] small { display: none !important; }
-        /* Additional targeting for file uploader limit text */
-        .stFileUploader > div > div > div > div > div > div > small { display: none !important; }
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    # Font Awesome for icons
-    st.markdown("<link rel=\"stylesheet\" href=\"https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css\">", unsafe_allow_html=True)
-
-    # Header
-    st.markdown(
-        """
-        <div class="app-header">
-          <div class="header-inner">
-            <div style="display:flex; align-items:center; gap:12px;">
-              <div class="logo"><i class="fas fa-robot" style="color:white; position:relative; z-index:1;"></i></div>
-              <div>
-                <div class="title">Talent AI</div>
-                <div class="subtitle">Smart Resume Screening & Ranking</div>
-              </div>
-            </div>
-            <div class="subtitle" style="display:flex; align-items:center; gap:6px;">
-              <i class="fas fa-brain" style="color:#3b82f6;"></i>
-              AI-Powered • TF-IDF + Cosine
-            </div>
-          </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
-
-    # Create tabs for navigation
-    tab1, tab2 = st.tabs(["🤖 Talent AI", "📊 Data Analysis"])
-   
-    with tab1:
-        show_talent_ai()
-   
-    with tab2:
-        show_dataset_analysis()
- 
-if __name__ == "__main__":
-    main()
+    # Start Flask application — bind to 0.0.0.0 for external connections.
+    # DEBUG and PORT are read from environment variables via the Config class.
+    app.run(debug=Config.FLASK_DEBUG, host='0.0.0.0', port=Config.PORT)

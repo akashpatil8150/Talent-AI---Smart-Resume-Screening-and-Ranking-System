@@ -1,0 +1,459 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="grid grid-cols-1 lg:grid-cols-12 gap-6">
+    <!-- Filters Sidebar -->
+    <div class="lg:col-span-3">
+        <div class="bg-white rounded-2xl shadow-lg border border-slate-200 p-6 sticky top-24 max-h-[calc(100vh-7rem)] overflow-y-auto">
+            <div class="flex items-center space-x-2 mb-6">
+                <i class="fas fa-sliders-h text-indigo-600"></i>
+                <h2 class="text-lg font-semibold text-slate-800">Filters</h2>
+            </div>
+            
+            <form id="filterForm" class="space-y-4">
+                <div>
+                    <label class="block text-sm font-medium text-slate-700 mb-2">Matching Mode</label>
+                    <select id="matching_mode" name="matching_mode" 
+                            class="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition">
+                        <option value="hybrid" selected>Hybrid (BERT + TF-IDF)</option>
+                        <option value="bert">BERT Only</option>
+                        <option value="tfidf">TF-IDF Only</option>
+                    </select>
+                    <p id="modeDescription" class="text-xs text-slate-500 mt-1"></p>
+                </div>
+                
+                <div>
+                    <label class="block text-sm font-medium text-slate-700 mb-2">Top N Candidates</label>
+                    <input type="number" id="top_n" name="top_n" value="{{ top_n_default }}" min="10" max="1000" step="10" 
+                           class="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition">
+                </div>
+                
+                <div class="grid grid-cols-2 gap-3">
+                    <div>
+                        <label class="block text-sm font-medium text-slate-700 mb-2">Weight: Text</label>
+                        <input type="number" id="wt_text" name="wt_text" value="0.85" min="0" max="1" step="0.05" 
+                               class="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-slate-700 mb-2">Weight: Exp</label>
+                        <input type="number" id="wt_exp" name="wt_exp" value="0.15" min="0" max="1" step="0.05" 
+                               class="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition">
+                    </div>
+                </div>
+                
+                <div>
+                    <label class="block text-sm font-medium text-slate-700 mb-2">Min Experience (years)</label>
+                    <input type="text" id="min_exp" name="min_exp" placeholder="e.g., 2" 
+                           class="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition">
+                </div>
+                
+                <div>
+                    <label class="block text-sm font-medium text-slate-700 mb-2">Max Experience (years)</label>
+                    <input type="text" id="max_exp" name="max_exp" placeholder="e.g., 10" 
+                           class="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition">
+                </div>
+                
+                <div>
+                    <label class="block text-sm font-medium text-slate-700 mb-2">Categories</label>
+                    <div class="flex flex-wrap gap-2 p-3 border border-slate-300 rounded-lg bg-slate-50 max-h-48 overflow-y-auto">
+                        {% for cat in categories %}
+                        <button type="button" class="category-chip px-3 py-1.5 bg-white text-slate-700 rounded-lg border border-slate-300 hover:border-indigo-400 hover:bg-indigo-50 transition-all duration-200 text-sm" 
+                                data-category="{{ cat }}">
+                            {{ cat }}
+                        </button>
+                        {% endfor %}
+                    </div>
+                </div>
+                
+                <div>
+                    <label class="block text-sm font-medium text-slate-700 mb-2">Include Skills</label>
+                    <input type="text" id="include_skills" name="include_skills" placeholder="e.g., Python, SQL" 
+                           class="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition">
+                </div>
+                
+                <div>
+                    <label class="block text-sm font-medium text-slate-700 mb-2">Exclude Skills</label>
+                    <input type="text" id="exclude_skills" name="exclude_skills" placeholder="e.g., Java" 
+                           class="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition">
+                </div>
+            </form>
+        </div>
+    </div>
+    
+    <!-- Main Content -->
+    <div class="lg:col-span-6 space-y-6">
+        <div class="bg-white rounded-2xl shadow-lg border border-slate-200 p-6">
+            <div class="flex items-center space-x-2 mb-4">
+                <i class="fas fa-file-alt text-indigo-600"></i>
+                <h2 class="text-lg font-semibold text-slate-800">Job Description</h2>
+            </div>
+            
+            <div class="mb-4">
+                <p class="text-sm text-slate-600 mb-3">Quick presets — click to autofill:</p>
+                <div class="flex flex-wrap gap-2">
+                    <button type="button" class="preset-chip px-4 py-2 bg-gradient-to-r from-indigo-50 to-purple-50 text-indigo-700 rounded-lg border border-indigo-200 hover:from-indigo-100 hover:to-purple-100 transition-all duration-200 text-sm font-medium" 
+                            data-jd="Looking for a Data Scientist with strong Python, SQL, Machine Learning, NLP experience to build models and dashboards.">
+                        <i class="fas fa-chart-line mr-1"></i> Data Scientist
+                    </button>
+                    <button type="button" class="preset-chip px-4 py-2 bg-gradient-to-r from-blue-50 to-cyan-50 text-blue-700 rounded-lg border border-blue-200 hover:from-blue-100 hover:to-cyan-100 transition-all duration-200 text-sm font-medium" 
+                            data-jd="Hiring a Backend Developer skilled in Java, Spring Boot, Microservices, REST APIs, SQL and cloud deployment.">
+                        <i class="fas fa-server mr-1"></i> Backend Dev
+                    </button>
+                    <button type="button" class="preset-chip px-4 py-2 bg-gradient-to-r from-pink-50 to-rose-50 text-pink-700 rounded-lg border border-pink-200 hover:from-pink-100 hover:to-rose-100 transition-all duration-200 text-sm font-medium" 
+                            data-jd="Seeking a Frontend Developer with React, JavaScript, HTML, CSS, responsive design and testing skills.">
+                        <i class="fas fa-palette mr-1"></i> Frontend Dev
+                    </button>
+                    <button type="button" class="preset-chip px-4 py-2 bg-gradient-to-r from-green-50 to-emerald-50 text-green-700 rounded-lg border border-green-200 hover:from-green-100 hover:to-emerald-100 transition-all duration-200 text-sm font-medium" 
+                            data-jd="Need a Data Analyst proficient in Excel, SQL, Tableau/Power BI, data cleaning and visualization.">
+                        <i class="fas fa-table mr-1"></i> Data Analyst
+                    </button>
+                    <button type="button" class="preset-chip px-4 py-2 bg-gradient-to-r from-orange-50 to-amber-50 text-orange-700 rounded-lg border border-orange-200 hover:from-orange-100 hover:to-amber-100 transition-all duration-200 text-sm font-medium" 
+                            data-jd="Looking for a DevOps Engineer with Docker, Kubernetes, CI/CD, AWS/Azure and Terraform.">
+                        <i class="fas fa-cogs mr-1"></i> DevOps
+                    </button>
+                </div>
+            </div>
+            
+            <textarea id="job_description" name="job_description" rows="8" 
+                      placeholder="Looking for a Data Scientist with Python, SQL, Machine Learning, NLP experience..." 
+                      class="w-full px-4 py-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition resize-none"></textarea>
+            
+            <button type="button" id="rankBtn" class="w-full mt-4 px-6 py-3 bg-gradient-to-r from-indigo-600 to-purple-600 text-white rounded-lg hover:from-indigo-700 hover:to-purple-700 transition-all duration-200 font-semibold shadow-lg hover:shadow-xl flex items-center justify-center space-x-2">
+                <i class="fas fa-ranking-star"></i>
+                <span>Rank Candidates</span>
+            </button>
+        </div>
+        
+        <div id="resultsContainer" style="display: none;">
+            <div class="bg-white rounded-2xl shadow-lg border border-slate-200 p-6">
+                <div class="flex items-center justify-between mb-4">
+                    <div class="flex items-center space-x-2">
+                        <i class="fas fa-trophy text-yellow-500"></i>
+                        <h2 class="text-lg font-semibold text-slate-800">Top Ranked Candidates</h2>
+                    </div>
+                    <div class="flex items-center space-x-2">
+                        <button id="fullscreenBtn" class="px-4 py-2 bg-gradient-to-r from-blue-500 to-cyan-600 text-white rounded-lg hover:from-blue-600 hover:to-cyan-700 transition-all duration-200 flex items-center space-x-2 shadow-md">
+                            <i class="fas fa-expand"></i>
+                            <span>Fullscreen</span>
+                        </button>
+                        <button id="searchBtn" class="px-4 py-2 bg-gradient-to-r from-purple-500 to-pink-600 text-white rounded-lg hover:from-purple-600 hover:to-pink-700 transition-all duration-200 flex items-center space-x-2 shadow-md">
+                            <i class="fas fa-search"></i>
+                            <span>Search</span>
+                        </button>
+                        <a href="{{ url_for('download_csv') }}" class="px-4 py-2 bg-gradient-to-r from-green-500 to-emerald-600 text-white rounded-lg hover:from-green-600 hover:to-emerald-700 transition-all duration-200 flex items-center space-x-2 shadow-md">
+                            <i class="fas fa-download"></i>
+                            <span>Download CSV</span>
+                        </a>
+                    </div>
+                </div>
+                
+                <!-- Search Box (hidden by default) -->
+                <div id="searchBox" style="display: none;" class="mb-4">
+                    <input type="text" id="searchInput" placeholder="Search candidates by name, email, skills..." 
+                           class="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent transition">
+                </div>
+                
+                <div id="resultsTable" class="overflow-x-auto max-h-[600px] overflow-y-auto"></div>
+                <p class="text-sm text-slate-500 mt-4">Total candidates in dataset: <strong class="text-slate-700">{{ sample_count }}</strong></p>
+            </div>
+        </div>
+        
+        <!-- Fullscreen Modal -->
+        <div id="fullscreenModal" class="fixed inset-0 bg-black bg-opacity-50 z-50 hidden flex items-center justify-center">
+            <div class="bg-white rounded-lg shadow-2xl w-[98vw] h-[98vh] flex flex-col">
+                <div class="flex items-center justify-between p-6 border-b border-slate-200 bg-gradient-to-r from-slate-50 to-slate-100">
+                    <div class="flex items-center space-x-3">
+                        <i class="fas fa-trophy text-yellow-500 text-2xl"></i>
+                        <h2 class="text-2xl font-bold text-slate-800">Top Ranked Candidates - Full Screen Preview</h2>
+                    </div>
+                    <div class="flex items-center space-x-3">
+                        <!-- Search Box -->
+                        <div class="relative">
+                            <input 
+                                type="text" 
+                                id="fullscreenSearchInput" 
+                                placeholder="Search candidates..." 
+                                class="pl-10 pr-4 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 w-64"
+                            />
+                            <i class="fas fa-search absolute left-3 top-1/2 transform -translate-y-1/2 text-slate-400"></i>
+                        </div>
+                        <!-- Download Button -->
+                        <a href="{{ url_for('download_csv') }}" class="px-5 py-2.5 bg-gradient-to-r from-green-500 to-emerald-600 hover:from-green-600 hover:to-emerald-700 text-white rounded-lg transition-all duration-200 flex items-center space-x-2 font-medium shadow-lg">
+                            <i class="fas fa-download"></i>
+                            <span>Download CSV</span>
+                        </a>
+                        <button id="closeFullscreenBtn" class="px-5 py-2.5 bg-slate-700 hover:bg-slate-800 text-white rounded-lg transition-all duration-200 flex items-center space-x-2 font-medium shadow-lg">
+                            <i class="fas fa-times"></i>
+                            <span>Close</span>
+                        </button>
+                    </div>
+                </div>
+                <div class="flex-1 overflow-auto p-6 bg-slate-50">
+                    <div id="fullscreenTable" class="bg-white rounded-lg shadow-sm"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Upload Sidebar -->
+    <div class="lg:col-span-3">
+        <div class="bg-white rounded-2xl shadow-lg border border-slate-200 p-6 sticky top-24 max-h-[calc(100vh-7rem)] overflow-y-auto">
+            <div class="flex items-center space-x-2 mb-4">
+                <i class="fas fa-cloud-upload-alt text-indigo-600"></i>
+                <h2 class="text-lg font-semibold text-slate-800">Upload Resume</h2>
+            </div>
+            <p class="text-xs text-slate-500 mb-4">Maximum file size: 20MB</p>
+            
+            <form id="resumeUploadForm" enctype="multipart/form-data" class="space-y-4">
+                <div class="relative">
+                    <input type="file" id="resume" name="resume" accept=".pdf" 
+                           class="w-full px-4 py-3 border-2 border-dashed border-slate-300 rounded-lg focus:border-indigo-500 transition cursor-pointer file:mr-4 file:py-2 file:px-4 file:rounded-lg file:border-0 file:bg-indigo-50 file:text-indigo-700 hover:file:bg-indigo-100">
+                </div>
+                <button type="submit" class="w-full px-4 py-3 bg-gradient-to-r from-indigo-500 to-purple-600 text-white rounded-lg hover:from-indigo-600 hover:to-purple-700 transition-all duration-200 font-medium shadow-md">
+                    <i class="fas fa-search mr-2"></i> Analyze Resume
+                </button>
+            </form>
+            
+            <div id="resumeInsights" style="display: none;" class="mt-6 space-y-4">
+                <div class="bg-green-50 border border-green-200 text-green-800 px-4 py-3 rounded-lg text-sm">
+                    <i class="fas fa-check-circle mr-2"></i> Resume analyzed successfully!
+                </div>
+                <div class="bg-gradient-to-br from-indigo-50 to-purple-50 border border-indigo-200 rounded-xl p-4 text-center">
+                    <p class="text-sm text-slate-600 mb-1">Resume Score</p>
+                    <p id="resumeScore" class="text-xl font-bold text-indigo-600">0</p>
+                </div>
+                <div class="space-y-2 text-sm">
+                    <div class="flex items-center justify-between py-2 border-b border-slate-100">
+                        <span class="text-slate-600">Name:</span>
+                        <span id="resumeName" class="font-medium text-slate-800">-</span>
+                    </div>
+                    <div class="flex items-center justify-between py-2 border-b border-slate-100">
+                        <span class="text-slate-600">Experience:</span>
+                        <span id="resumeExp" class="font-medium text-slate-800">0 years</span>
+                    </div>
+                    <div class="flex items-center justify-between py-2">
+                        <span class="text-slate-600">Skills found:</span>
+                        <span id="resumeSkills" class="font-medium text-slate-800">0</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    const presetChips = document.querySelectorAll('.preset-chip');
+    const categoryChips = document.querySelectorAll('.category-chip');
+    const jobDescTextarea = document.getElementById('job_description');
+    const rankBtn = document.getElementById('rankBtn');
+    const resumeUploadForm = document.getElementById('resumeUploadForm');
+    const fullscreenBtn = document.getElementById('fullscreenBtn');
+    const closeFullscreenBtn = document.getElementById('closeFullscreenBtn');
+    const fullscreenModal = document.getElementById('fullscreenModal');
+    const searchBtn = document.getElementById('searchBtn');
+    const searchBox = document.getElementById('searchBox');
+    const searchInput = document.getElementById('searchInput');
+    const matchingModeSelect = document.getElementById('matching_mode');
+    const modeDescription = document.getElementById('modeDescription');
+    
+    let currentTableHTML = '';
+    let selectedCategories = new Set();
+    
+    // Mode descriptions with icons
+    const modeDescriptions = {
+        'hybrid': '⚡ Hybrid mode combines semantic understanding with keyword matching for balanced results',
+        'bert': '🧠 BERT mode uses AI to understand context and meaning, finding semantically similar candidates',
+        'tfidf': '🔍 TF-IDF mode uses fast keyword matching for exact skill and term matching'
+    };
+    
+    // Set initial description on page load
+    modeDescription.textContent = modeDescriptions[matchingModeSelect.value];
+    
+    // Update description when mode changes
+    matchingModeSelect.addEventListener('change', function() {
+        const selectedMode = this.value;
+        modeDescription.textContent = modeDescriptions[selectedMode];
+    });
+    
+    // Handle category chip clicks
+    categoryChips.forEach(chip => {
+        chip.addEventListener('click', function() {
+            const category = this.getAttribute('data-category');
+            
+            if (selectedCategories.has(category)) {
+                // Deselect
+                selectedCategories.delete(category);
+                this.classList.remove('bg-indigo-500', 'text-white', 'border-indigo-500');
+                this.classList.add('bg-white', 'text-slate-700', 'border-slate-300');
+            } else {
+                // Select
+                selectedCategories.add(category);
+                this.classList.remove('bg-white', 'text-slate-700', 'border-slate-300');
+                this.classList.add('bg-indigo-500', 'text-white', 'border-indigo-500');
+            }
+        });
+    });
+    
+    presetChips.forEach(chip => {
+        chip.addEventListener('click', function() {
+            jobDescTextarea.value = this.getAttribute('data-jd');
+        });
+    });
+    
+    rankBtn.addEventListener('click', function() {
+        const jdValue = jobDescTextarea.value.trim();
+        if (!jdValue) {
+            alert('Please enter a Job Description');
+            return;
+        }
+        
+        const formData = new FormData(document.getElementById('filterForm'));
+        formData.append('job_description', jdValue);
+        
+        // Add selected categories from the chip selection
+        selectedCategories.forEach(cat => formData.append('selected_categories', cat));
+        
+        fetch('/rank', {
+            method: 'POST',
+            body: formData
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.error) {
+                alert(data.error);
+            } else {
+                currentTableHTML = data.html;
+                document.getElementById('resultsTable').innerHTML = currentTableHTML;
+                document.getElementById('resultsContainer').style.display = 'block';
+            }
+        })
+        .catch(error => {
+            alert('Error: ' + error);
+        });
+    });
+    
+    // Fullscreen functionality
+    fullscreenBtn.addEventListener('click', function() {
+        document.getElementById('fullscreenTable').innerHTML = currentTableHTML;
+        fullscreenModal.classList.remove('hidden');
+        document.body.style.overflow = 'hidden';
+    });
+    
+    // Close on outside click
+    fullscreenModal.addEventListener('click', function(e) {
+        if (e.target === fullscreenModal) {
+            fullscreenModal.classList.add('hidden');
+            document.body.style.overflow = 'auto';
+        }
+    });
+    
+    // Fullscreen search functionality
+    const fullscreenSearchInput = document.getElementById('fullscreenSearchInput');
+    fullscreenSearchInput.addEventListener('input', function() {
+        const searchTerm = this.value.toLowerCase();
+        const table = document.querySelector('#fullscreenTable table');
+        if (!table) return;
+        
+        const rows = table.querySelectorAll('tbody tr');
+        let visibleCount = 0;
+        
+        rows.forEach(row => {
+            const text = row.textContent.toLowerCase();
+            if (text.includes(searchTerm)) {
+                row.style.display = '';
+                visibleCount++;
+            } else {
+                row.style.display = 'none';
+            }
+        });
+        
+        // Show "No results found" message if all rows are hidden
+        const tbody = table.querySelector('tbody');
+        let noResultsRow = tbody.querySelector('.no-results-row');
+        
+        if (visibleCount === 0 && searchTerm !== '') {
+            if (!noResultsRow) {
+                noResultsRow = document.createElement('tr');
+                noResultsRow.className = 'no-results-row';
+                noResultsRow.innerHTML = '<td colspan="100%" class="text-center py-8 text-slate-500"><i class="fas fa-search mr-2"></i>No candidates found matching your search</td>';
+                tbody.appendChild(noResultsRow);
+            }
+        } else if (noResultsRow) {
+            noResultsRow.remove();
+        }
+    });
+    
+    // Clear fullscreen search when modal closes
+    closeFullscreenBtn.addEventListener('click', function() {
+        fullscreenModal.classList.add('hidden');
+        document.body.style.overflow = 'auto';
+        fullscreenSearchInput.value = '';
+    });
+    
+    // Search functionality
+    searchBtn.addEventListener('click', function() {
+        if (searchBox.style.display === 'none') {
+            searchBox.style.display = 'block';
+            searchInput.focus();
+        } else {
+            searchBox.style.display = 'none';
+            searchInput.value = '';
+            document.getElementById('resultsTable').innerHTML = currentTableHTML;
+        }
+    });
+    
+    searchInput.addEventListener('input', function() {
+        const searchTerm = this.value.toLowerCase();
+        const table = document.querySelector('#resultsTable table');
+        if (!table) return;
+        
+        const rows = table.querySelectorAll('tbody tr');
+        rows.forEach(row => {
+            const text = row.textContent.toLowerCase();
+            if (text.includes(searchTerm)) {
+                row.style.display = '';
+            } else {
+                row.style.display = 'none';
+            }
+        });
+    });
+    
+    resumeUploadForm.addEventListener('submit', function(e) {
+        e.preventDefault();
+        
+        const formData = new FormData(this);
+        formData.append('job_description', jobDescTextarea.value);
+        
+        fetch('/upload_resume', {
+            method: 'POST',
+            body: formData
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.error) {
+                alert(data.error);
+            } else {
+                document.getElementById('resumeScore').textContent = data.insights.resume_score;
+                document.getElementById('resumeName').textContent = data.insights.name;
+                document.getElementById('resumeExp').textContent = data.insights.experience_years;
+                document.getElementById('resumeSkills').textContent = data.insights.skills_count;
+                document.getElementById('resumeInsights').style.display = 'block';
+                
+                // Show debug text in console
+                if (data.debug_text) {
+                    console.log('=== PDF EXTRACTED TEXT (first 500 chars) ===');
+                    console.log(data.debug_text);
+                    console.log('=== END DEBUG ===');
+                }
+            }
+        })
+        .catch(error => {
+            alert('Error: ' + error);
+        });
+    });
+});
+</script>
+{% endblock %}
