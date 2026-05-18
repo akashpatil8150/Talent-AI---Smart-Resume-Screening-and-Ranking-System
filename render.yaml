@@ -5,7 +5,7 @@ services:
     region: oregon
     plan: free
     buildCommand: pip install -r requirements.txt && python -c "import nltk; nltk.download('punkt'); nltk.download('punkt_tab'); nltk.download('stopwords')"
-    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --workers 2 --timeout 120 --max-requests 1000 --access-logfile - --error-logfile -
+    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --workers 1 --timeout 120 --max-requests 1000 --access-logfile - --error-logfile -
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.7
@@ -16,7 +16,7 @@ services:
       - key: SKIP_BERT_PRECOMPUTE
         value: true
       - key: MATCHING_MODE
-        value: hybrid
+        value: tfidf
       - key: FLASK_DEBUG
         value: false
       - key: TOP_N_DEFAULT
