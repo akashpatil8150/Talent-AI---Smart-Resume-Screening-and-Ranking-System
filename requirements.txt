@@ -21,9 +21,10 @@ nltk==3.8.1
 matplotlib==3.8.2
 seaborn==0.13.0
 
-# BERT Dependencies - commented out for free tier (512MB RAM limit)
-# Uncomment on paid tier (1GB+ RAM) to enable BERT/hybrid matching
-# sentence-transformers==2.2.2
-# transformers==4.36.2
-# --extra-index-url https://download.pytorch.org/whl/cpu
-# torch==2.1.2+cpu
+# BERT Dependencies (CPU-only - works on HF Spaces free tier with 16GB RAM)
+sentence-transformers==2.2.2
+transformers==4.36.2
+
+# PyTorch CPU-only (smaller size)
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.1.2+cpu

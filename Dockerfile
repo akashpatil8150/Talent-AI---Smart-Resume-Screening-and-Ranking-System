@@ -1,4 +1,5 @@
-# Use Python 3.11 slim base image for smaller size
+# Hugging Face Spaces compatible Dockerfile
+# HF Spaces runs as non-root user 1000, port 7860
 FROM python:3.11-slim
 
 # Set working directory
@@ -13,10 +14,8 @@ RUN apt-get update && apt-get install -y \
 # Copy requirements file
 COPY requirements.txt .
 
-# Install Python dependencies
-# Use CPU-only PyTorch for smaller image size
-RUN pip install --no-cache-dir -r requirements.txt && \
-    pip install --no-cache-dir gunicorn==21.2.0
+# Install Python dependencies (includes PyTorch CPU + sentence-transformers)
+RUN pip install --no-cache-dir -r requirements.txt
 
 # Download NLTK data during build
 RUN python -c "import nltk; nltk.download('punkt'); nltk.download('punkt_tab'); nltk.download('stopwords')"
@@ -24,22 +23,25 @@ RUN python -c "import nltk; nltk.download('punkt'); nltk.download('punkt_tab'); 
 # Copy application files
 COPY . .
 
-# Create cache directory for embeddings
-RUN mkdir -p .bert_cache .cache
+# Create cache directories and set permissions for HF Spaces (runs as user 1000)
+RUN mkdir -p .bert_cache .cache && \
+    chmod -R 777 .bert_cache .cache
 
 # Set environment variables for production
-ENV PORT=8080
+ENV PORT=7860
 ENV BERT_FORCE_CPU=true
 ENV SKIP_BERT_PRECOMPUTE=true
+ENV MATCHING_MODE=hybrid
 ENV PYTHONUNBUFFERED=1
 ENV FLASK_DEBUG=false
+ENV TRANSFORMERS_CACHE=/app/.cache
 
-# Expose port
-EXPOSE 8080
+# Expose HF Spaces port
+EXPOSE 7860
 
 # Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
-    CMD curl -f http://localhost:8080/health || exit 1
+HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=3 \
+    CMD curl -f http://localhost:7860/health || exit 1
 
-# Run with gunicorn
-CMD gunicorn app:app --bind 0.0.0.0:$PORT --workers 2 --timeout 120 --max-requests 1000 --access-logfile - --error-logfile -
+# Run with gunicorn - 1 worker to stay within memory
+CMD gunicorn app:app --bind 0.0.0.0:7860 --workers 1 --timeout 120 --max-requests 1000 --access-logfile - --error-logfile -
