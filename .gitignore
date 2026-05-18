@@ -145,9 +145,9 @@ Thumbs.db
 *.csv
 !candidates.csv
 
-# BERT embedding cache - intentionally tracked for deployment
-# Pre-computed embeddings are included in the repo to avoid recomputation on every deploy
-# .bert_cache/
+# BERT embedding cache - large binary files, excluded from git
+# Render uses persistent disk at /app/.bert_cache instead
+.bert_cache/
 
 # Test files
 test_*.py
@@ -161,3 +161,9 @@ static/
 *.db
 *.sqlite
 *.sqlite3
+
+# Kiro IDE specs and configuration
+.kiro/
+
+# Task summary files
+TASK_*.md
