@@ -1,12 +1,3 @@
----
-title: Talent AI Smart Resume Screening
-emoji: 🎯
-colorFrom: blue
-colorTo: purple
-sdk: docker
-app_port: 7860
-pinned: false
----
 
 # Talent AI — Smart Resume Screening & Ranking System
 
