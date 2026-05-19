@@ -12,6 +12,13 @@ pinned: false
 
 An AI-powered resume screening application that ranks candidates based on job descriptions using BERT and TF-IDF matching.
 
+[![Live Demo](https://img.shields.io/badge/Live%20Demo-Hugging%20Face%20Spaces-blue?logo=huggingface)](https://akash8150-talent-ai-smart-resume-screening-and-r-175d457.hf.space/)
+[![GitHub](https://img.shields.io/badge/GitHub-Repository-black?logo=github)](https://github.com/akashpatil8150/Talent-AI---Smart-Resume-Screening-and-Ranking-System)
+
+## 🚀 Live Demo
+
+👉 **[Try it here](https://akash8150-talent-ai-smart-resume-screening-and-r-175d457.hf.space/)**
+
 ## Features
 
 - **BERT + TF-IDF Hybrid Matching** — semantic similarity using sentence-transformers
@@ -34,3 +41,19 @@ An AI-powered resume screening application that ranks candidates based on job de
 - scikit-learn TF-IDF
 - pandas, numpy, matplotlib
 - gunicorn (production WSGI server)
+
+## Getting Started Locally
+
+```bash
+git clone https://github.com/akashpatil8150/Talent-AI---Smart-Resume-Screening-and-Ranking-System.git
+cd Talent-AI---Smart-Resume-Screening-and-Ranking-System
+pip install -r requirements.txt
+python app.py
+```
+
+## Docker
+
+```bash
+docker build -t talent-ai .
+docker run -p 7860:7860 talent-ai
+```
