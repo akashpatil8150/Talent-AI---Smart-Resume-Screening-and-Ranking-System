@@ -196,5 +196,3 @@ docker run -p 7860:7860 talent-ai
 ---
 
 ## 📄 License
-
-This project is open source. Feel free to fork, modify, and build on it.
